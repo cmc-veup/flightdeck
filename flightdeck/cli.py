@@ -1,0 +1,50 @@
+"""flightdeck command-line interface."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+
+from . import __version__
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(
+        prog="flightdeck",
+        description="Truthful multi-provider AI token-usage collector.",
+    )
+    p.add_argument("--version", action="version", version=f"flightdeck {__version__}")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    pc = sub.add_parser("collect", help="incremental scan of all sources into ~/.flightdeck/usage.db")
+    pc.add_argument("--full", action="store_true", help="ignore the checkpoint and re-scan everything")
+    pc.add_argument("--json", action="store_true", help="emit collection stats as JSON")
+    pc.add_argument("-q", "--quiet", action="store_true", help="suppress progress output")
+
+    pr = sub.add_parser("report", help="windowed usage totals")
+    pr.add_argument("--since", default="24h", choices=["24h", "7d", "30d"])
+    pr.add_argument("--json", action="store_true", help="robot JSON output")
+    pr.add_argument("--now", default=None, help=argparse.SUPPRESS)  # fixed window end (ISO Z), for verification
+
+    pd = sub.add_parser("doctor", help="data-source availability matrix")
+    pd.add_argument("--json", action="store_true")
+
+    args = p.parse_args(argv)
+
+    if args.cmd == "collect":
+        from . import collect
+        stats = collect.run(full=args.full, quiet=args.quiet or args.json)
+        if args.json:
+            print(json.dumps(stats, indent=2))
+    elif args.cmd == "report":
+        from . import report
+        report.run(since=args.since, as_json=args.json, now=args.now)
+    elif args.cmd == "doctor":
+        from . import doctor
+        doctor.run(as_json=args.json)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
