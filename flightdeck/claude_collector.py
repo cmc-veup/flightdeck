@@ -1,10 +1,20 @@
 """Claude Code transcript collector.
 
-Correctness rules (each one is a documented bug in a prior tool):
+Subagents are a primary dimension of the spend architecture: sessions fan out
+agents, and a large share of all spend happens in those fan-outs. This
+collector exists to measure that architecture correctly — every event is
+classified main / subagent / workflow-subagent and attributed to the parent
+sessionId, so main-vs-subagent spend can be reported per provider and model.
+
+Correctness rules (each one is why prior tools could not see the
+architecture):
   * recurse into <session>/subagents/ AND <session>/subagents/workflows/wf_*/
-  * a subagent file (isSidechain:true / agent-*.jsonl) is attributed to its
-    PARENT sessionId and flagged is_sidechain=1 — it is stored once, so it can
-    never be double-counted into session totals (the mission-control rglob bug)
+    — the workflow layout alone hid ~2,000 transcript files from every earlier
+    scanner
+  * a subagent file (isSidechain:true / agent-*.jsonl) is stored exactly once,
+    attributed to its PARENT sessionId with its source class — the mechanism
+    that makes the fan-out measurable is the same one that prevents the
+    mission-control rglob double-count
   * cross-Mac synced sessions are deduped by (sessionId, message uuid), not by
     file path — the unique key (provider, session_id, event_id) enforces it
   * journal.jsonl is skipped
@@ -43,15 +53,29 @@ def fallback_session_id(path: Path) -> str | None:
     return path.stem
 
 
-def is_sidechain_path(path: Path) -> bool:
-    return path.name.startswith("agent-") or "subagents" in path.parts
+def sidechain_class(path: Path) -> int:
+    """0 = main-session file, 1 = plain subagent, 2 = workflow subagent.
+
+    Workflow subagents live under subagents/workflows/wf_*/; plain subagents
+    directly under subagents/. The value lands in the is_sidechain column
+    (truthiness still means "sidechain", so 0/1 consumers keep working).
+    """
+    parts = path.parts
+    if "subagents" in parts:
+        i = parts.index("subagents")
+        if i + 1 < len(parts) - 1 and parts[i + 1] == "workflows":
+            return 2
+        return 1
+    if path.name.startswith("agent-"):
+        return 1
+    return 0
 
 
 def parse_file(path: Path) -> list[dict]:
     """Extract normalized usage rows from one Claude Code JSONL transcript."""
     rows: list[dict] = []
     fb_session = fallback_session_id(path)
-    path_sidechain = is_sidechain_path(path)
+    path_class = sidechain_class(path)
     try:
         fh = open(path, "r", encoding="utf-8", errors="replace")
     except OSError:
@@ -96,7 +120,7 @@ def parse_file(path: Path) -> list[dict]:
                     "cache_5m_tokens": int(cc.get("ephemeral_5m_input_tokens") or 0),
                     "cache_1h_tokens": int(cc.get("ephemeral_1h_input_tokens") or 0),
                     "reasoning_tokens": 0,
-                    "is_sidechain": 1 if (o.get("isSidechain") or path_sidechain) else 0,
+                    "is_sidechain": path_class or (1 if o.get("isSidechain") else 0),
                     "agent_id": o.get("agentId"),
                     "cwd": o.get("cwd"),
                     "cost_micros": None,

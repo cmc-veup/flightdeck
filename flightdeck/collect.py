@@ -19,7 +19,12 @@ def run(full: bool = False, quiet: bool = False) -> dict:
     refresh_pricing(conn)
     ck = checkpoint.load()
     if full:
+        # every source is rebuildable from disk, so a full run is a true
+        # rebuild: wipe rows so reclassifications (e.g. source class) apply
+        # instead of being silently ignored by INSERT OR IGNORE
         ck = {"files": {}, "cursors": {}}
+        conn.execute("DELETE FROM usage_events")
+        conn.commit()
     stats = {"files_scanned": 0, "files_skipped": 0, "rows": 0, "by_source": {}}
 
     def log(msg: str) -> None:

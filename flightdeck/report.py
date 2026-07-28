@@ -1,4 +1,10 @@
-"""`flightdeck report` — windowed totals, human table or robot JSON."""
+"""`flightdeck report` — windowed totals, human table or robot JSON.
+
+Subagents are a first-class reporting dimension, not a footnote: the estate
+runs as parallel sessions fanning out agents, so every section that carries
+cost also carries the main/subagent split. Source classes come from the
+is_sidechain column: 0 = main, 1 = plain subagent, 2 = workflow subagent.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +19,8 @@ TOKEN_COLS = [
     "input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens",
     "cache_5m_tokens", "cache_1h_tokens", "reasoning_tokens",
 ]
+
+SOURCE_NAMES = {0: "main", 1: "subagent", 2: "workflow-subagent"}
 
 
 def iso_z(dt: datetime) -> str:
@@ -43,6 +51,23 @@ def _add(agg: dict, row: dict, cost: float, est: bool) -> None:
     agg["cost_is_estimate"] = agg["cost_is_estimate"] or est
 
 
+def _merge(agg: dict, other: dict) -> None:
+    _add(agg, other, other["cost_usd"], other["cost_is_estimate"])
+
+
+def _billed_tokens(v: dict) -> int:
+    return sum(v[c] for c in TOKEN_COLS[:4])
+
+
+def _with_share(v: dict, total_tokens: int, total_cost: float) -> dict:
+    toks = _billed_tokens(v)
+    return v | {
+        "total_tokens": toks,
+        "token_share": round(toks / total_tokens, 4) if total_tokens else 0.0,
+        "cost_share": round(v["cost_usd"] / total_cost, 4) if total_cost else 0.0,
+    }
+
+
 def gather(since: str = "24h", now: str | None = None, db_path=None) -> dict:
     start, end = window_bounds(since, now)
     conn = open_db(db_path)
@@ -62,11 +87,14 @@ def gather(since: str = "24h", now: str | None = None, db_path=None) -> dict:
     by_provider: dict[str, dict] = {}
     by_model: dict[str, dict] = {}
     by_account: dict[str, dict] = {}
+    by_source: dict[str, dict] = {name: _zero() for name in SOURCE_NAMES.values()}
+    spend_architecture: dict[str, dict] = {}
+    by_model_source: dict[str, dict] = {}
     total = _zero()
-    sidechain = _zero()
 
     for r in cur:
-        provider, account, model, is_side = r[0], r[1], r[2] or "?", r[3]
+        provider, account, model, side = r[0], r[1], r[2] or "?", r[3]
+        source = SOURCE_NAMES.get(side, "subagent")
         row = dict(zip(TOKEN_COLS, r[4:11]))
         row = {k: int(v or 0) for k, v in row.items()}
         row["events"] = r[11]
@@ -81,23 +109,38 @@ def gather(since: str = "24h", now: str | None = None, db_path=None) -> dict:
         _add(by_provider.setdefault(provider, _zero()), row, cost, est)
         _add(by_model.setdefault(model, _zero()), row, cost, est)
         _add(by_account.setdefault(f"{provider}/{account}", _zero()), row, cost, est)
+        _add(by_source[source], row, cost, est)
+        _add(spend_architecture.setdefault(f"{provider}/{source}", _zero()), row, cost, est)
+        _add(by_model_source.setdefault(f"{model}/{source}", _zero()), row, cost, est)
         _add(total, row, cost, est)
-        if is_side:
-            _add(sidechain, row, cost, est)
     conn.close()
 
     hours = WINDOWS[since].total_seconds() / 3600
-    total_tokens = sum(total[c] for c in TOKEN_COLS[:4])
+    total_tokens = _billed_tokens(total)
+    total_cost = total["cost_usd"]
     grand = {
         **total,
         "total_tokens": total_tokens,
         "tokens_per_hour": round(total_tokens / hours, 1),
-        "cost_per_day_usd": round(total["cost_usd"] / (hours / 24), 4),
+        "cost_per_day_usd": round(total_cost / (hours / 24), 4),
     }
-    side_tokens = sum(sidechain[c] for c in TOKEN_COLS[:4])
+
+    sub_all = _zero()
+    _merge(sub_all, by_source["subagent"])
+    _merge(sub_all, by_source["workflow-subagent"])
+    sources = {
+        "main": _with_share(by_source["main"], total_tokens, total_cost),
+        "subagent_total": _with_share(sub_all, total_tokens, total_cost),
+        "subagent_plain": _with_share(by_source["subagent"], total_tokens, total_cost),
+        "workflow_subagent": _with_share(by_source["workflow-subagent"], total_tokens, total_cost),
+    }
+
     return {
         "window": {"since": since, "start": start, "end": end},
         "totals": grand,
+        "sources": sources,
+        "spend_architecture": spend_architecture,
+        "by_model_source": by_model_source,
         "by_provider": by_provider,
         "by_model": by_model,
         "by_account_root": by_account,
@@ -109,10 +152,11 @@ def gather(since: str = "24h", now: str | None = None, db_path=None) -> dict:
             "cache_5m_tokens": total["cache_5m_tokens"],
             "cache_1h_tokens": total["cache_1h_tokens"],
         },
+        # legacy key, kept for compatibility with early consumers
         "subagent": {
-            "tokens": side_tokens,
-            "share_of_total": round(side_tokens / total_tokens, 4) if total_tokens else 0.0,
-            "cost_usd": round(sidechain["cost_usd"], 4),
+            "tokens": sources["subagent_total"]["total_tokens"],
+            "share_of_total": sources["subagent_total"]["token_share"],
+            "cost_usd": round(sources["subagent_total"]["cost_usd"], 4),
         },
     }
 
@@ -121,6 +165,23 @@ def _fmt(n: int | float) -> str:
     if isinstance(n, float):
         return f"{n:,.2f}"
     return f"{n:,}"
+
+
+def _section_table(out: list[str], title: str, section: dict) -> None:
+    out.append("")
+    out.append(f"  {title}:")
+    rows = sorted(section.items(), key=lambda kv: -_billed_tokens(kv[1]))
+    name_w = max((len(k) for k, _ in rows), default=4) + 2
+    out.append(
+        f"    {'':<{name_w}}{'events':>9}{'in':>14}{'out':>12}{'cache_wr':>14}{'cache_rd':>16}{'cost$':>10}"
+    )
+    for name, v in rows:
+        est = "*" if v["cost_is_estimate"] else ""
+        out.append(
+            f"    {name:<{name_w}}{_fmt(v['events']):>9}{_fmt(v['input_tokens']):>14}"
+            f"{_fmt(v['output_tokens']):>12}{_fmt(v['cache_creation_tokens']):>14}"
+            f"{_fmt(v['cache_read_tokens']):>16}{v['cost_usd']:>9,.2f}{est}"
+        )
 
 
 def render_human(data: dict) -> str:
@@ -142,33 +203,24 @@ def render_human(data: dict) -> str:
         f"(5m {_fmt(cs['cache_5m_tokens'])} / 1h {_fmt(cs['cache_1h_tokens'])}) | "
         f"uncached in {_fmt(cs['input_tokens'])} | out {_fmt(cs['output_tokens'])}"
     )
-    sa = data["subagent"]
-    out.append(
-        f"  subagents: {_fmt(sa['tokens'])} tokens ({sa['share_of_total']:.1%} of total)"
-    )
-    for title, section in (
-        ("by provider", data["by_provider"]),
-        ("by account root", data["by_account_root"]),
-        ("by model", data["by_model"]),
-    ):
-        out.append("")
-        out.append(f"  {title}:")
-        rows = sorted(
-            section.items(),
-            key=lambda kv: -(kv[1]["input_tokens"] + kv[1]["output_tokens"]
-                             + kv[1]["cache_read_tokens"] + kv[1]["cache_creation_tokens"]),
-        )
-        name_w = max((len(k) for k, _ in rows), default=4) + 2
+
+    s = data["sources"]
+    out.append("")
+    out.append("  main vs subagent:")
+    for label, key in (("main", "main"), ("subagent", "subagent_total")):
+        v = s[key]
         out.append(
-            f"    {'':<{name_w}}{'in':>14}{'out':>12}{'cache_rd':>16}{'cache_wr':>14}{'cost$':>10}"
+            f"    {label:<11}{_fmt(v['total_tokens']):>16} tok ({v['token_share']:.1%})   "
+            f"${v['cost_usd']:>10,.2f} ({v['cost_share']:.1%})   {_fmt(v['events'])} events"
         )
-        for name, v in rows:
-            est = "*" if v["cost_is_estimate"] else ""
-            out.append(
-                f"    {name:<{name_w}}{_fmt(v['input_tokens']):>14}{_fmt(v['output_tokens']):>12}"
-                f"{_fmt(v['cache_read_tokens']):>16}{_fmt(v['cache_creation_tokens']):>14}"
-                f"{v['cost_usd']:>9,.2f}{est}"
-            )
+    out.append(
+        f"    {'':<11}subagent = plain {_fmt(s['subagent_plain']['total_tokens'])}"
+        f" + workflow {_fmt(s['workflow_subagent']['total_tokens'])} tok"
+    )
+
+    _section_table(out, "spend architecture (provider x source)", data["spend_architecture"])
+    _section_table(out, "model x source", data["by_model_source"])
+    _section_table(out, "by account root", data["by_account_root"])
     out.append("")
     out.append("  * = includes estimated pricing (see `pricing` table, is_estimate=1)")
     return "\n".join(out)
