@@ -1,0 +1,16 @@
+[project]
+name = "flightdeck"
+version = "0.1.0"
+description = "Truthful multi-provider AI token-usage collector (Claude Code, Codex, Grok)"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+
+[project.scripts]
+flightdeck = "flightdeck.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["flightdeck"]
