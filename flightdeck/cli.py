@@ -22,13 +22,26 @@ def main(argv: list[str] | None = None) -> int:
     pc.add_argument("--json", action="store_true", help="emit collection stats as JSON")
     pc.add_argument("-q", "--quiet", action="store_true", help="suppress progress output")
 
-    pr = sub.add_parser("report", help="windowed usage totals")
+    pr = sub.add_parser(
+        "report",
+        help="windowed usage totals with the main/subagent spend-architecture split",
+    )
     pr.add_argument("--since", default="24h", choices=["24h", "7d", "30d"])
     pr.add_argument("--json", action="store_true", help="robot JSON output")
     pr.add_argument("--now", default=None, help=argparse.SUPPRESS)  # fixed window end (ISO Z), for verification
 
     pd = sub.add_parser("doctor", help="data-source availability matrix")
     pd.add_argument("--json", action="store_true")
+
+    pe = sub.add_parser(
+        "export",
+        help="write a leaderboard payload (never auto-submits)",
+    )
+    pe.add_argument(
+        "--viberank", action="store_true",
+        help="ccusage-compatible JSON for viberank.app (Claude rows, dedup-corrected)",
+    )
+    pe.add_argument("--out", default=None, help="output file (default ~/.flightdeck/viberank-cc.json)")
 
     args = p.parse_args(argv)
 
@@ -43,6 +56,11 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "doctor":
         from . import doctor
         doctor.run(as_json=args.json)
+    elif args.cmd == "export":
+        if not args.viberank:
+            p.error("export currently supports --viberank only")
+        from . import export_viberank
+        export_viberank.run(out=args.out)
     return 0
 
 
