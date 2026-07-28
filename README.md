@@ -8,15 +8,19 @@ A token-usage collector for local AI coding agents that reports numbers you can 
 
 ## Why this exists
 
-Every usage dashboard already on this machine was wrong in a different way:
+Every usage dashboard already on this machine was wrong in a different way, and most of the failures share a root cause: they could not see the fan-out architecture the machine actually runs.
 
-- **Subagent double-counting.** Tools that `rglob` every `*.jsonl` count a subagent transcript twice: once as its own session and once inside its parent. Flightdeck attributes each subagent event to its parent session exactly once, with a sidechain flag so the share is still visible.
+- **Blind to subagents.** Tools that `rglob` every `*.jsonl` count a subagent transcript twice, once as its own session and once inside its parent, which makes the main-vs-subagent split unreportable. Flightdeck classifies every event (main / subagent / workflow subagent), attributes it to its parent session exactly once, and reports the architecture as a first-class dimension.
 - **Stale caches.** One collector read a Claude stats cache that had not updated since February and reported it as current.
 - **Unread Codex accounting.** Codex writes exact cumulative token counts (`token_count` events, including cached and reasoning tokens) into every rollout file. Prior tools counted characters instead, or read only the first 100 lines of each file.
-- **Invisible layouts.** Workflow subagents live under `subagents/workflows/wf_*/`. Roughly 2,000 transcript files were invisible to every earlier scanner.
+- **Invisible layouts.** Workflow subagents live under `subagents/workflows/wf_*/`. Roughly 2,000 transcript files, a whole tier of the fan-out, were invisible to every earlier scanner.
 - **Sync duplication.** Sessions synced across Macs appear under multiple paths. Flightdeck dedupes by `(sessionId, message uuid)`, not by file path.
 
 Every one of those failure modes has a unit test.
+
+## Subagents are the spend architecture
+
+This estate runs as 5 to 30 parallel sessions, each fanning out subagents and workflow agents. That fan-out is not overhead on top of the "real" usage; it is how the work gets done, and at build time it accounted for roughly 30% of all tokens in a 24-hour window. A usage report that collapses it into a footnote misprices a third of the operation and hides the one dimension you would tune first. So `flightdeck report` treats query source as a primary axis: the headline carries the main-vs-subagent split for both tokens and cost, a spend-architecture table breaks it down per provider (with workflow subagents separated from plain ones), and a model-by-source table catches the common case where subagents run a different model than their parent. Parent attribution exists to make this measurable; preventing double-counts is the mechanism, not the point.
 
 ## Install
 
@@ -36,11 +40,16 @@ flightdeck collect --full     # ignore the checkpoint, re-scan everything
 flightdeck report             # human table, last 24h
 flightdeck report --since 7d --json
 flightdeck doctor             # which sources exist, freshness, row counts
+flightdeck export --viberank  # ccusage-shaped leaderboard payload (never auto-submits)
 ```
 
 `collect` is incremental: a per-file mtime+size checkpoint in `~/.flightdeck/checkpoint.json` means a 5.7 GB corpus is scanned once, and each later run touches only files that changed. Re-parsing is idempotent; the unique event key makes duplicate inserts a no-op.
 
-`report` shows totals by provider, model, and account root, the cache read/write split (including the 5m/1h TTL breakdown), the subagent share, dollars per day, and tokens per hour for the window. `--json` emits the same data for scripts.
+`report` leads with the main-vs-subagent split (tokens and cost, with each side's share), then breaks the window down three ways: a spend-architecture table (provider by source, with workflow subagents separated from plain ones), model by source, and account root. Cache read/write totals include the 5m/1h TTL breakdown; burn is reported as dollars per day and tokens per hour. `--json` emits the same data for scripts; the `sources`, `spend_architecture`, and `by_model_source` keys are additive and stable.
+
+## Leaderboards
+
+`flightdeck export --viberank` writes a `ccusage --json`-shaped payload for [viberank](https://www.viberank.app), the public Claude Code usage leaderboard: Claude-provider rows only, all account roots merged into daily totals with per-model breakdowns and computed cost. Because these are the dedup-corrected numbers, the entry is defensible where naive scanners inflate totals by double-counting subagent transcripts. Flightdeck never submits anything on its own: it writes the file and prints the two manual paths (GitHub sign-in upload at viberank.app, or `npx viberank-cli`). If you do submit, the only data that leaves the machine is aggregate daily token counts, model names, and computed USD cost. No prompts, no file paths, no project or session names.
 
 ## Data sources
 
