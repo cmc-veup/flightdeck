@@ -104,7 +104,8 @@ class ClaudeParserTests(unittest.TestCase):
         row = self.conn.execute(
             "SELECT session_id, is_sidechain FROM usage_events"
         ).fetchone()
-        self.assertEqual(row, ("sess-3", 1))
+        # workflow subagents carry source class 2 (still truthy = sidechain)
+        self.assertEqual(row, ("sess-3", 2))
 
     def test_sidechain_missing_sessionid_falls_back_to_layout(self):
         sub = self.proj / "sess-4" / "subagents"
