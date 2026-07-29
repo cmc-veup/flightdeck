@@ -27,7 +27,7 @@ This estate runs as 5 to 30 parallel sessions, each fanning out subagents and wo
 Python 3.11+, standard library plus SQLite. No third-party dependencies.
 
 ```bash
-git clone https://github.com/justakeyboardbetweenus/flightdeck
+git clone https://github.com/cmc-veup/flightdeck
 cd flightdeck
 pip install -e .        # or run in place: python3 -m flightdeck ...
 ```
@@ -63,7 +63,7 @@ Use this rather than `npx viberank-cli`. The CLI regenerates the payload with `n
 **One command per device:**
 
 ```bash
-git clone https://github.com/justakeyboardbetweenus/flightdeck && cd flightdeck
+git clone https://github.com/cmc-veup/flightdeck && cd flightdeck
 scripts/setup-device.sh --sync-repo ~/usage-repo     # omit --sync-repo to stay local
 ```
 
