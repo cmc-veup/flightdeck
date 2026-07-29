@@ -34,6 +34,12 @@ def main(argv: list[str] | None = None) -> int:
     pm.add_argument("database", help="path to the other machine's ~/.flightdeck/usage.db")
     pm.add_argument("--device", default=None, help="label incoming rows as <device>:<root>")
 
+    ps = sub.add_parser("submit", help="post the leaderboard payload (public, irreversible)")
+    ps.add_argument("--viberank", action="store_true", help="submit to viberank.app")
+    ps.add_argument("--user", default=None, help="your GitHub handle — required, never guessed")
+    ps.add_argument("--payload", default=None, help="path to the export (default ~/.flightdeck/viberank-cc.json)")
+    ps.add_argument("--yes", action="store_true", help="actually send; without it, prints what would be sent")
+
     sub.add_parser("total", help="the honest estate total (per-event + archive, max per session)")
 
     pd = sub.add_parser("doctor", help="data-source availability matrix")
@@ -82,6 +88,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  new events : {s['new_events']:,}  (duplicates ignored by primary key)")
         print(f"  new tokens : {s['new_tokens']:,}")
         print(f"  total now  : {s['total_events']:,} events / {s['total_tokens']:,} tokens")
+    elif args.cmd == "submit":
+        if not args.viberank:
+            p.error("submit currently supports --viberank only")
+        from . import submit
+        from .paths import FLIGHTDECK_DIR
+        payload = args.payload or (FLIGHTDECK_DIR / "viberank-cc.json")
+        s = submit.run(payload, args.user, confirmed=args.yes)
+        print(f"  payload : {s['payload']}")
+        print(f"  content : {s['days']} days, {s['tokens']:,} tokens, ${s['cost']:,.2f}")
+        print(f"  as user : {s['user']}")
+        if not s["sent"]:
+            print("\n  nothing sent. re-run with --yes to publish.")
+            print("  what leaves this machine: daily token counts, model names, computed cost.")
+            print("  no prompts, no paths, no project or session names.")
+        else:
+            r = s.get("response") or {}
+            print(f"\n  submitted: {r.get('message') or r}")
+            if r.get("profileUrl"):
+                print(f"  profile  : {r['profileUrl']}")
     elif args.cmd == "total":
         from . import reconcile
         from .db import open_db

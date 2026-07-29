@@ -49,7 +49,14 @@ flightdeck export --viberank  # ccusage-shaped leaderboard payload (never auto-s
 
 ## Leaderboards
 
-`flightdeck export --viberank` writes a `ccusage --json`-shaped payload for [viberank](https://www.viberank.app), the public coding-agent usage leaderboard: every provider (viberank has an all-models view), all account roots merged into daily totals with per-model breakdowns and computed cost. Subagent tokens are included — they are billed API calls and roughly a third of this estate — and sessions recovered from the archive are folded in, so the payload reconciles to `flightdeck total` rather than to whatever happens to survive on disk. Flightdeck never submits anything on its own: it writes the file and prints the two manual paths (GitHub sign-in upload at viberank.app, or `npx viberank-cli`). If you do submit, the only data that leaves the machine is aggregate daily token counts, model names, and computed USD cost. No prompts, no file paths, no project or session names.
+`flightdeck export --viberank` writes a `ccusage --json`-shaped payload for [viberank](https://www.viberank.app), the public coding-agent usage leaderboard: every provider (viberank has an all-models view), all account roots merged into daily totals with per-model breakdowns and computed cost. Subagent tokens are included — they are billed API calls and roughly a third of this estate — and sessions recovered from the archive are folded in, so the payload reconciles to `flightdeck total` rather than to whatever happens to survive on disk. To publish it:
+
+```bash
+flightdeck submit --viberank --user <your-github-handle>          # prints what would go, sends nothing
+flightdeck submit --viberank --user <your-github-handle> --yes    # actually publishes
+```
+
+Use this rather than `npx viberank-cli`. The CLI regenerates the payload with `npx ccusage@latest daily --json` and posts *that*, discarding every correction — recovered months, subagent burn, archive reconciliation — and it guesses your identity from `git config user.name`, which is a real name, not a GitHub handle. `flightdeck submit` posts the file you just built, to the same endpoint and headers (verified against viberank-cli 1.2.0), and `--user` is required rather than inferred: publishing tens of thousands of dollars of usage under the wrong handle is not recoverable. Nothing is sent without `--yes`. If you do submit, the only data that leaves the machine is aggregate daily token counts, model names, and computed USD cost. No prompts, no file paths, no project or session names.
 
 ## Multiple devices
 
