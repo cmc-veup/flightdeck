@@ -127,18 +127,45 @@ def import_checkpoint(db_path=None, checkpoint: Path | None = None) -> dict:
 
 
 def archive_totals(conn) -> dict:
-    """Tokens recoverable from the archive — deleted transcripts only."""
+    """Tokens the archive contributes that NOTHING else has.
+
+    An archive row is superseded once its session exists as per-event rows
+    (e.g. recovered from the agentsview index). Counting both would inflate
+    the total twice over: once by duplication, and once because the archive's
+    aggregates are themselves overstated — for the 70,743 sessions where both
+    sources exist, mission-control's numbers run **1.41x** the per-event
+    truth (its rglob counted subagent transcripts as sessions AND inside
+    their parents). Per-event always wins; the archive only fills gaps.
+    """
     try:
-        cur = conn.execute(
-            """SELECT COUNT(*), COALESCE(SUM(input_tokens+output_tokens
-                      +cache_creation_tokens+cache_read_tokens),0),
-                      MIN(day), MAX(day)
+        live = {s[:11] for (s,) in
+                conn.execute("SELECT DISTINCT session_id FROM usage_events")}
+        rows = conn.execute(
+            """SELECT source_file, day, input_tokens+output_tokens
+                      +cache_creation_tokens+cache_read_tokens
                FROM archived_usage WHERE still_on_disk = 0"""
-        )
+        ).fetchall()
     except Exception:
-        return {"files": 0, "tokens": 0, "first_day": None, "last_day": None}
-    n, tok, first, last = cur.fetchone()
-    return {"files": n or 0, "tokens": tok or 0, "first_day": first, "last_day": last}
+        return {"files": 0, "tokens": 0, "first_day": None, "last_day": None,
+                "superseded_files": 0, "superseded_tokens": 0}
+
+    n = tok = sup_n = sup_tok = 0
+    days = []
+    for source_file, day, t in rows:
+        sid = (source_file.split("mc-cache:", 1)[1] if source_file.startswith("mc-cache:")
+               else Path(source_file).stem)[:11]
+        if sid in live:
+            sup_n += 1
+            sup_tok += t or 0
+            continue
+        n += 1
+        tok += t or 0
+        if day:
+            days.append(day)
+    return {"files": n, "tokens": tok,
+            "first_day": min(days) if days else None,
+            "last_day": max(days) if days else None,
+            "superseded_files": sup_n, "superseded_tokens": sup_tok}
 
 
 MC_CACHE = Path("/Users/christianmc/vc/.usage-cache.json")
