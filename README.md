@@ -53,6 +53,20 @@ flightdeck export --viberank  # ccusage-shaped leaderboard payload (never auto-s
 
 ## Multiple devices
 
+**One command per device:**
+
+```bash
+git clone https://github.com/justakeyboardbetweenus/flightdeck && cd flightdeck
+scripts/setup-device.sh --sync-repo ~/usage-repo     # omit --sync-repo to stay local
+```
+
+It sets `cleanupPeriodDays` so Claude Code stops deleting your history (backing up `settings.json` first), runs the first collect, installs an hourly job (launchd on macOS, cron elsewhere) that collects and — with `--sync-repo` — exports and pushes this device's rows, then prints what to run next. Idempotent: re-running is safe.
+
+Then on any machine: `git pull && for f in devices/*.jsonl; do flightdeck merge "$f"; done && flightdeck total`.
+
+**For a team**, it is the same shape with one private repo and one file per person (`devices/<name>.jsonl`). Each engineer runs the line above pointed at the shared repo; nobody's file collides with anyone else's, and any member can produce the combined total or their own leaderboard payload.
+
+
 Each machine reads only its own transcripts, so each has a partial picture. Three ways to get one number, in ascending order of how much you have to trust the network:
 
 ```bash
