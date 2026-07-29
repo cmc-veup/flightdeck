@@ -63,3 +63,44 @@ def test_mc_cache_dedupes_on_truncated_id(tmp_path):
     s = A.import_mission_control_cache(db_path=db, cache=cache)
     assert s["skipped_already_counted"] == 1
     assert s["recovered_tokens"] == 100
+
+
+def test_agentsview_recovery_keys_and_no_uuid_safety(tmp_path):
+    """Recovery must key subagent events under the PARENT session (so they
+    collide with transcript-derived rows), and may only synthesize a key for
+    uuid-less rows when flightdeck holds nothing for that session."""
+    import sqlite3
+    from flightdeck import agentsview_import as A
+    from flightdeck.db import open_db
+
+    av = tmp_path / "av.db"
+    c = sqlite3.connect(av)
+    c.executescript("""
+        CREATE TABLE sessions (id TEXT PRIMARY KEY, file_path TEXT, parent_session_id TEXT);
+        CREATE TABLE messages (session_id TEXT, source_uuid TEXT, timestamp TEXT,
+          model TEXT, is_sidechain INT, token_usage TEXT, ordinal INT);
+    """)
+    c.execute("INSERT INTO sessions VALUES ('child','/p/s.jsonl','parent')")
+    c.execute("INSERT INTO sessions VALUES ('parent','/p/s.jsonl',NULL)")
+    c.execute("INSERT INTO sessions VALUES ('lonely','/p/x.jsonl',NULL)")
+    usage = json.dumps({"input_tokens": 1, "output_tokens": 2,
+                        "cache_read_input_tokens": 7, "cache_creation_input_tokens": 0})
+    # subagent event, already ingested under the parent → must dedupe
+    c.execute("INSERT INTO messages VALUES ('child','u1','2026-05-01T00:00:00Z','m',1,?,0)", (usage,))
+    # uuid-less row for a session flightdeck already knows → must be skipped
+    c.execute("INSERT INTO messages VALUES ('parent','','2026-05-01T00:00:00Z','m',0,?,5)", (usage,))
+    # uuid-less row for a session flightdeck has never seen → safe to recover
+    c.execute("INSERT INTO messages VALUES ('lonely','','2026-04-01T00:00:00Z','m',0,?,1)", (usage,))
+    c.commit()
+
+    db = tmp_path / "u.db"
+    conn = open_db(db)
+    conn.execute("INSERT INTO usage_events (provider,account_root,session_id,event_id,"
+                 "input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens) "
+                 "VALUES ('claude','main','parent','u1',1,2,0,7)")
+    conn.commit()
+
+    r = A.run(db_path=db, source=av)
+    assert r["already_present"] == 1, "subagent event must key under its parent"
+    assert r["skipped_no_uuid"] == 1, "uuid-less row for a known session is unsafe"
+    assert r["new_events"] == 1 and r["recovered_tokens"] == 10

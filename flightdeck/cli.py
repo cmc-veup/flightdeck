@@ -69,6 +69,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"usage-checkpoint: {s['rows']:,} file records")
             print(f"  recovered (deleted): {s['recovered_tokens']:,} tokens")
             total += s["recovered_tokens"]
+        from . import agentsview_import
+        av = agentsview_import.run()
+        if av.get("found"):
+            print(f"agentsview index: {av['new_events']:,} events recovered at FULL "
+                  f"per-event fidelity ({av['already_present']:,} already present)")
+            print(f"  recovered: {av['recovered_tokens']:,} tokens")
         m = archive.import_mission_control_cache()
         if m["found"]:
             print(f"mission-control cache: {m['rows']:,} sessions "
