@@ -63,13 +63,21 @@ def main(argv: list[str] | None = None) -> int:
         doctor.run(as_json=args.json)
     elif args.cmd == "import-archive":
         from . import archive
+        total = 0
         s = archive.import_checkpoint()
-        if not s["found"]:
-            print(f"no archive at {archive.CHECKPOINT}")
-        else:
-            print(f"archive: {s['rows']:,} file records from {archive.CHECKPOINT.name}")
-            print(f"  recovered (transcript deleted): {s['recovered_tokens']:,} tokens")
-            print(f"  already counted (still on disk): {s['surviving_tokens']:,} tokens")
+        if s["found"]:
+            print(f"usage-checkpoint: {s['rows']:,} file records")
+            print(f"  recovered (deleted): {s['recovered_tokens']:,} tokens")
+            total += s["recovered_tokens"]
+        m = archive.import_mission_control_cache()
+        if m["found"]:
+            print(f"mission-control cache: {m['rows']:,} sessions "
+                  f"({m.get('skipped_already_counted', 0):,} already counted)")
+            print(f"  recovered (deleted): {m['recovered_tokens']:,} tokens")
+            total += m["recovered_tokens"]
+        from .db import open_db
+        t = archive.archive_totals(open_db())
+        print(f"ARCHIVE TOTAL: {t['tokens']:,} tokens across {t['files']:,} vanished transcripts")
     elif args.cmd == "export":
         if not args.viberank:
             p.error("export currently supports --viberank only")

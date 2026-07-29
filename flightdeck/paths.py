@@ -54,6 +54,25 @@ def discover_claude_roots(home: Path | None = None) -> list[tuple[Path, str, str
         provider = base if base in NON_CLAUDE_BACKENDS else "claude"
         found[d / "projects"] = (provider, label)
 
+    # Session archives that live outside any CLAUDE_CONFIG_DIR: Syncthing-
+    # replicated transcript folders carrying sessions from the other machine.
+    # Same Claude JSONL format; the (provider, session_id, event_id) primary
+    # key makes re-ingesting an already-counted session a no-op, so scanning
+    # them can only ADD what was missing.
+    for extra, label in ((h / ".session-vc", "session-vc"),
+                         (h / ".session-gt", "session-gt")):
+        if extra.is_dir():
+            found[extra] = ("claude", label)
+
+    # Archived transcript trees pulled off other machines (scripts/grab-mb1.sh).
+    # Ingesting the archive is safe by construction: identical events collide on
+    # the (provider, session_id, event_id) primary key and are ignored, so only
+    # sessions that exist nowhere else are added.
+    archive = Path(os.environ.get("TRANSCRIPT_ARCHIVE", str(h / "transcript-archive")))
+    for tree in sorted(archive.glob("mb1/*")):
+        if tree.is_dir() and not tree.name.startswith("_"):
+            found[tree] = ("claude", f"mb1-{tree.name}")
+
     return [(p, prov, label) for p, (prov, label) in sorted(found.items())]
 
 

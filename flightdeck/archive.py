@@ -139,3 +139,72 @@ def archive_totals(conn) -> dict:
         return {"files": 0, "tokens": 0, "first_day": None, "last_day": None}
     n, tok, first, last = cur.fetchone()
     return {"files": n or 0, "tokens": tok or 0, "first_day": first, "last_day": last}
+
+
+MC_CACHE = Path("/Users/christianmc/vc/.usage-cache.json")
+
+
+def import_mission_control_cache(db_path=None, cache: Path | None = None) -> dict:
+    """Recover per-session aggregates from mission-control's disk cache.
+
+    `~/vc/.usage-cache.json` (scanned 2026-06-12) holds 75k per-session rows
+    from an era whose transcripts have since been deleted — it is the only
+    surviving record of April/May 2026.
+
+    Join key gotcha: mission-control truncates session ids to 11 chars, so a
+    naive comparison against full UUIDs shows zero overlap and would re-add
+    everything. Dedupe is on the truncated prefix against (a) sessions already
+    ingested per-event, (b) the checkpoint archive, (c) transcripts still on
+    disk. Only genuinely-vanished sessions are recorded as recovered.
+    """
+    src = cache or MC_CACHE
+    conn = open_db(db_path)
+    conn.executescript(SCHEMA)
+    if not src.exists():
+        return {"found": False, "rows": 0, "recovered_tokens": 0}
+
+    rows = [r for r in json.loads(src.read_text()).get("sessions", []) if isinstance(r, dict)]
+    if not rows:
+        return {"found": True, "rows": 0, "recovered_tokens": 0}
+    width = len(rows[0].get("id") or "") or 11
+
+    live = {s[:width] for (s,) in conn.execute("SELECT DISTINCT session_id FROM usage_events")}
+    ck = {Path(p).stem[:width] for (p,) in conn.execute("SELECT source_file FROM archived_usage")}
+    on_disk = set()
+    projects = HOME / ".claude" / "projects"
+    if projects.exists():
+        on_disk = {p.stem[:width] for p in projects.rglob("*.jsonl")}
+    already = live | ck | on_disk
+
+    seen, recovered, skipped = set(), 0, 0
+    for r in rows:
+        sid = r.get("id")
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        if sid in already:
+            skipped += 1
+            continue
+        inp = r.get("input_tokens") or 0
+        out = r.get("output_tokens") or 0
+        cw = r.get("cache_creation_tokens") or 0
+        cr = r.get("cache_read_tokens") or 0
+        cwd = r.get("cwd") or ""
+        conn.execute(
+            """INSERT INTO archived_usage
+               (source_file, origin, machine, provider, account_root, project, model,
+                day, is_sidechain, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, messages, still_on_disk)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
+               ON CONFLICT(source_file) DO NOTHING""",
+            (f"mc-cache:{sid}", "mission-control-cache",
+             "mb1" if "/Users/mchack/" in cwd else "local", "claude",
+             (r.get("account") or "main").lower(), r.get("project"), r.get("model"),
+             (r.get("first_ts") or r.get("last_ts") or "")[:10],
+             1 if str(r.get("source", "")).startswith("agent") else 0,
+             inp, out, cw, cr, r.get("messages") or 0),
+        )
+        recovered += inp + out + cw + cr
+    conn.commit()
+    return {"found": True, "rows": len(seen), "skipped_already_counted": skipped,
+            "recovered_tokens": recovered}
