@@ -136,8 +136,11 @@ def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
                    COALESCE(SUM({tok}),0)
             FROM usage_events WHERE ts >= ?""", (since,)).fetchone()
     recent_sub_pct = (100.0 * win[0] / win[1]) if win[1] else 0.0
+    days_covered = conn.execute(
+        "SELECT COUNT(DISTINCT substr(ts,1,10)) FROM usage_events").fetchone()[0]
     return {
         "tokens": est["total"],
+        "days_covered": days_covered,
         "subagent_pct": recent_sub_pct,
         "subagent_pct_alltime": (100.0 * est["per_event_subagent"] / measured) if measured else 0,
         "cache_pct": (100.0 * (est["cache_read"] + est["cache_write"]) / measured) if measured else 0,
@@ -163,9 +166,7 @@ def build(conn, rank: int | None = None, tier: str | None = None,
         "cache": _shield("cache", f"{m['cache_pct']:.0f}% of tokens"),
     }
     if rank:
-        # "Supernova" is viberank's own tier jargon and means nothing to a
-        # stranger; a denominator does. "#11 of ~1,000" is legible on sight.
-        msg = f"#{rank} of ~{rank_total:,}" if rank_total else f"#{rank}"
+        msg = f"#{rank} · {tier}" if tier else f"#{rank}"
         out["viberank"] = _shield("viberank", msg)
     return out
 
@@ -251,5 +252,12 @@ def run(out_dir: str | Path, db_path=None, rank: int | None = None,
     chart = out / "usage.svg"
     chart.write_text(svg_chart(series))
     written.append(str(chart))
+    # Machine-readable metrics, so prose that quotes these numbers can be
+    # regenerated rather than retyped. A README claiming to be live while
+    # carrying hand-typed figures is exactly the drift this tool exists to
+    # catch.
+    mfile = out / "badges" / "metrics.json"
+    mfile.write_text(json.dumps(collect_metrics(conn, rank, tier, days), indent=2))
+    written.append(str(mfile))
     return {"written": written, "days_charted": len(series),
             "metrics": collect_metrics(conn, rank, tier, days)}
