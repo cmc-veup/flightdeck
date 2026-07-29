@@ -33,6 +33,11 @@ def main(argv: list[str] | None = None) -> int:
     pd = sub.add_parser("doctor", help="data-source availability matrix")
     pd.add_argument("--json", action="store_true")
 
+    sub.add_parser(
+        "import-archive",
+        help="recover usage from DELETED transcripts via ~/.claude/usage-checkpoint.json",
+    )
+
     pe = sub.add_parser(
         "export",
         help="write a leaderboard payload (never auto-submits)",
@@ -56,6 +61,15 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "doctor":
         from . import doctor
         doctor.run(as_json=args.json)
+    elif args.cmd == "import-archive":
+        from . import archive
+        s = archive.import_checkpoint()
+        if not s["found"]:
+            print(f"no archive at {archive.CHECKPOINT}")
+        else:
+            print(f"archive: {s['rows']:,} file records from {archive.CHECKPOINT.name}")
+            print(f"  recovered (transcript deleted): {s['recovered_tokens']:,} tokens")
+            print(f"  already counted (still on disk): {s['surviving_tokens']:,} tokens")
     elif args.cmd == "export":
         if not args.viberank:
             p.error("export currently supports --viberank only")

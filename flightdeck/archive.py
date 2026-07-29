@@ -1,0 +1,141 @@
+"""Recover usage from transcripts that no longer exist on disk.
+
+Claude Code deletes transcripts after `cleanupPeriodDays` (default 30), and
+disk-pressure cleanups take more. That makes the live corpus a *rolling
+window*, not a ledger: on this machine April and May 2026 are simply gone
+from the main root, and mission-control's own cumulative counter was seen
+DROPPING from 56.6B (2026-05-22) to 46.9B (2026-06-12) — impossible unless
+source files vanished.
+
+Anything that reports "all-time" by scanning transcripts is therefore
+reporting *what survived*, not what was spent. This module reconstructs the
+lost portion from per-file aggregates left behind by earlier tools —
+today `~/.claude/usage-checkpoint.json` (spend-tracker.py), which still
+holds 6,608 file records for files that are all gone, including the mb1
+machine (`/Users/mchack/...`).
+
+Reconstructed rows live in their OWN table. They are per-file aggregates,
+not per-event rows: mixing them into `usage_events` would fake a precision
+they don't have and risk double-counting anything that did survive. Reports
+add them as a clearly-labelled archive line.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from .paths import HOME
+from .db import open_db
+
+CHECKPOINT = HOME / ".claude" / "usage-checkpoint.json"
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS archived_usage (
+    source_file   TEXT PRIMARY KEY,       -- absolute path of the (now deleted) transcript
+    origin        TEXT NOT NULL,          -- which archive it was recovered from
+    machine       TEXT,                   -- mb1 (mchack) | local | unknown
+    provider      TEXT NOT NULL,
+    account_root  TEXT NOT NULL,
+    project       TEXT,
+    model         TEXT,
+    day           TEXT,                   -- YYYY-MM-DD
+    is_sidechain  INTEGER NOT NULL DEFAULT 0,
+    input_tokens          INTEGER NOT NULL DEFAULT 0,
+    output_tokens         INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+    messages      INTEGER NOT NULL DEFAULT 0,
+    still_on_disk INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_archived_day ON archived_usage(day);
+"""
+
+
+def classify(path: str, rec: dict) -> tuple[str, str, int]:
+    """(machine, account_root, is_sidechain) from the recorded path.
+
+    Structural only — path segments and the archive's own `source` field.
+    """
+    p = Path(path)
+    machine = "mb1" if "/Users/mchack/" in path else "local"
+    if ".claude-accounts/" in path:
+        parts = path.split(".claude-accounts/", 1)[1].split("/", 1)
+        account_root = parts[0] or "unknown"
+    elif ".claude-deepseek" in path:
+        account_root = "deepseek"
+    else:
+        account_root = "main"
+    sidechain = 1 if ("/subagents/" in path or p.name.startswith("agent-")) else 0
+    if not sidechain and str(rec.get("source", "")).startswith("subagent"):
+        sidechain = 1
+    return machine, account_root, sidechain
+
+
+def import_checkpoint(db_path=None, checkpoint: Path | None = None) -> dict:
+    """Load the spend-tracker checkpoint. Returns a summary dict.
+
+    `still_on_disk` is recorded per row so reports can add ONLY the rows whose
+    transcripts are gone — the surviving ones are already counted, per event,
+    in `usage_events`.
+    """
+    src = checkpoint or CHECKPOINT
+    conn = open_db(db_path)
+    conn.executescript(SCHEMA)
+    if not src.exists():
+        return {"found": False, "rows": 0, "recovered_tokens": 0}
+
+    data = json.loads(src.read_text())
+    sessions = data.get("sessions") or data
+    rows, recovered, surviving = 0, 0, 0
+    for path, rec in sessions.items():
+        if not isinstance(rec, dict):
+            continue
+        machine, account_root, sidechain = classify(path, rec)
+        on_disk = 1 if Path(path).exists() else 0
+        inp = rec.get("input_tokens") or 0
+        out = rec.get("output_tokens") or 0
+        cw = rec.get("cache_create_tokens") or rec.get("cache_creation_tokens") or 0
+        cr = rec.get("cache_read_tokens") or 0
+        conn.execute(
+            """INSERT INTO archived_usage
+               (source_file, origin, machine, provider, account_root, project, model,
+                day, is_sidechain, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, messages, still_on_disk)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(source_file) DO UPDATE SET
+                 still_on_disk=excluded.still_on_disk""",
+            (path, "usage-checkpoint", machine,
+             "deepseek" if account_root == "deepseek" else "claude",
+             account_root, rec.get("project"), rec.get("model"),
+             (rec.get("date") or "")[:10], sidechain,
+             inp, out, cw, cr, rec.get("messages") or 0, on_disk),
+        )
+        rows += 1
+        total = inp + out + cw + cr
+        if on_disk:
+            surviving += total
+        else:
+            recovered += total
+    conn.commit()
+    return {
+        "found": True,
+        "rows": rows,
+        "recovered_tokens": recovered,
+        "surviving_tokens": surviving,
+    }
+
+
+def archive_totals(conn) -> dict:
+    """Tokens recoverable from the archive — deleted transcripts only."""
+    try:
+        cur = conn.execute(
+            """SELECT COUNT(*), COALESCE(SUM(input_tokens+output_tokens
+                      +cache_creation_tokens+cache_read_tokens),0),
+                      MIN(day), MAX(day)
+               FROM archived_usage WHERE still_on_disk = 0"""
+        )
+    except Exception:
+        return {"files": 0, "tokens": 0, "first_day": None, "last_day": None}
+    n, tok, first, last = cur.fetchone()
+    return {"files": n or 0, "tokens": tok or 0, "first_day": first, "last_day": last}
