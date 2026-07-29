@@ -51,6 +51,24 @@ flightdeck export --viberank  # ccusage-shaped leaderboard payload (never auto-s
 
 `flightdeck export --viberank` writes a `ccusage --json`-shaped payload for [viberank](https://www.viberank.app), the public coding-agent usage leaderboard: every provider (viberank has an all-models view), all account roots merged into daily totals with per-model breakdowns and computed cost. Subagent tokens are included — they are billed API calls and roughly a third of this estate — and sessions recovered from the archive are folded in, so the payload reconciles to `flightdeck total` rather than to whatever happens to survive on disk. Flightdeck never submits anything on its own: it writes the file and prints the two manual paths (GitHub sign-in upload at viberank.app, or `npx viberank-cli`). If you do submit, the only data that leaves the machine is aggregate daily token counts, model names, and computed USD cost. No prompts, no file paths, no project or session names.
 
+## Multiple devices
+
+Each machine reads only its own transcripts, so each has a partial picture. Three ways to get one number, in ascending order of how much you have to trust the network:
+
+```bash
+# 1. merge — collect on each device, copy the small SQLite file over, merge
+flightdeck merge /path/to/other-machine-usage.db --device laptop
+
+# 2. pull raw transcripts off another host, then collect locally
+scripts/grab-device.sh mb1.local mb1     # rsync over ssh into the archive
+
+# 3. sync the transcript directories (Syncthing et al) and collect on one box
+```
+
+Dedupe is structural, not heuristic: rows are keyed `(provider, session_id, event_id)`, so a session that exists on two devices — the common case, since transcripts sync — merges to one copy, and re-running a merge is a no-op. `--device` labels incoming rows `<device>:<root>` if you want per-machine reporting.
+
+Do **not** share one `usage.db` over Dropbox or Syncthing and write to it from several machines. SQLite over a file-sync layer corrupts.
+
 ## Data sources
 
 | Source | Path | What is read |

@@ -64,14 +64,18 @@ def discover_claude_roots(home: Path | None = None) -> list[tuple[Path, str, str
         if extra.is_dir():
             found[extra] = ("claude", label)
 
-    # Archived transcript trees pulled off other machines (scripts/grab-mb1.sh).
-    # Ingesting the archive is safe by construction: identical events collide on
-    # the (provider, session_id, event_id) primary key and are ignored, so only
-    # sessions that exist nowhere else are added.
+    # Transcript trees pulled off OTHER DEVICES (scripts/grab-device.sh writes
+    # <archive>/<device>/<tree>). Ingesting them is safe by construction:
+    # identical events collide on the (provider, session_id, event_id) primary
+    # key and are ignored, so a session synced to two machines counts once.
     archive = Path(os.environ.get("TRANSCRIPT_ARCHIVE", str(h / "transcript-archive")))
-    for tree in sorted(archive.glob("mb1/*")):
-        if tree.is_dir() and not tree.name.startswith("_"):
-            found[tree] = ("claude", f"mb1-{tree.name}")
+    for device in sorted(archive.glob("*")):
+        if not device.is_dir() or device.name.startswith("_"):
+            continue
+        # a device dir holds tree subdirs; a local mirror holds jsonl directly
+        for tree in sorted(device.glob("*")):
+            if tree.is_dir() and not tree.name.startswith("_") and any(tree.rglob("*.jsonl")):
+                found[tree] = ("claude", f"{device.name}-{tree.name}")
 
     return [(p, prov, label) for p, (prov, label) in sorted(found.items())]
 

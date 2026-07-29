@@ -30,6 +30,10 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--json", action="store_true", help="robot JSON output")
     pr.add_argument("--now", default=None, help=argparse.SUPPRESS)  # fixed window end (ISO Z), for verification
 
+    pm = sub.add_parser("merge", help="merge another device's usage.db into this one")
+    pm.add_argument("database", help="path to the other machine's ~/.flightdeck/usage.db")
+    pm.add_argument("--device", default=None, help="label incoming rows as <device>:<root>")
+
     sub.add_parser("total", help="the honest estate total (per-event + archive, max per session)")
 
     pd = sub.add_parser("doctor", help="data-source availability matrix")
@@ -60,6 +64,13 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "report":
         from . import report
         report.run(since=args.since, as_json=args.json, now=args.now)
+    elif args.cmd == "merge":
+        from . import merge
+        s = merge.run(args.database, device=args.device)
+        print(f"merged {s['source']}")
+        print(f"  new events : {s['new_events']:,}  (duplicates ignored by primary key)")
+        print(f"  new tokens : {s['new_tokens']:,}")
+        print(f"  total now  : {s['total_events']:,} events / {s['total_tokens']:,} tokens")
     elif args.cmd == "total":
         from . import reconcile
         from .db import open_db
