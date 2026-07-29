@@ -162,3 +162,21 @@ class ClaudeParserTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_discover_finds_every_config_dir(tmp_path, monkeypatch):
+    """Root discovery, not a hardcoded list: new account profiles and
+    provider-behind-a-Claude-shell dirs must be picked up automatically."""
+    from flightdeck import paths
+
+    for rel in (".claude/projects", ".claude-accounts/veup/projects",
+                ".claude-mcc22/projects", ".claude-kimi/projects",
+                ".claude-deepseek-test/projects"):
+        (tmp_path / rel).mkdir(parents=True)
+    (tmp_path / ".claude-noprojects").mkdir()
+
+    found = {label: prov for _p, prov, label in paths.discover_claude_roots(tmp_path)}
+    assert found == {
+        "main": "claude", "veup": "claude", "mcc22": "claude",
+        "kimi": "kimi", "deepseek-test": "deepseek",
+    }
