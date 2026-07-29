@@ -52,6 +52,12 @@ def main(argv: list[str] | None = None) -> int:
         "--viberank", action="store_true",
         help="ccusage-compatible JSON for viberank.app (Claude rows, dedup-corrected)",
     )
+    pe.add_argument(
+        "--rows", action="store_true",
+        help="portable NDJSON of usage rows for multi-device sync via git (cwd redacted)")
+    pe.add_argument("--include-cwd", action="store_true",
+                    help="keep working directories in --rows (they name clients; private repos only)")
+    pe.add_argument("--since", default=None, help="--rows: only events at/after this ISO date")
     pe.add_argument("--out", default=None, help="output file (default ~/.flightdeck/viberank-cc.json)")
 
     args = p.parse_args(argv)
@@ -65,8 +71,13 @@ def main(argv: list[str] | None = None) -> int:
         from . import report
         report.run(since=args.since, as_json=args.json, now=args.now)
     elif args.cmd == "merge":
-        from . import merge
-        s = merge.run(args.database, device=args.device)
+        if str(args.database).endswith((".jsonl", ".ndjson")):
+            from . import rows as _rows
+            s = _rows.import_rows(args.database, device=args.device)
+            s.setdefault("source", args.database)
+        else:
+            from . import merge
+            s = merge.run(args.database, device=args.device)
         print(f"merged {s['source']}")
         print(f"  new events : {s['new_events']:,}  (duplicates ignored by primary key)")
         print(f"  new tokens : {s['new_tokens']:,}")
@@ -102,10 +113,18 @@ def main(argv: list[str] | None = None) -> int:
         t = archive.archive_totals(open_db())
         print(f"ARCHIVE TOTAL: {t['tokens']:,} tokens across {t['files']:,} vanished transcripts")
     elif args.cmd == "export":
-        if not args.viberank:
-            p.error("export currently supports --viberank only")
-        from . import export_viberank
-        export_viberank.run(out=args.out)
+        if args.rows:
+            from . import rows
+            s = rows.export_rows(args.out or "flightdeck-rows.jsonl",
+                                 include_cwd=args.include_cwd, since=args.since)
+            print(f"wrote {s['out']}")
+            print(f"  {s['events']:,} events / {s['tokens']:,} tokens"
+                  f"  (cwd {'included' if s['cwd_included'] else 'REDACTED'})")
+        elif args.viberank:
+            from . import export_viberank
+            export_viberank.run(out=args.out)
+        else:
+            p.error("export needs --viberank or --rows")
     return 0
 
 

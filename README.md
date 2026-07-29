@@ -56,14 +56,23 @@ flightdeck export --viberank  # ccusage-shaped leaderboard payload (never auto-s
 Each machine reads only its own transcripts, so each has a partial picture. Three ways to get one number, in ascending order of how much you have to trust the network:
 
 ```bash
-# 1. merge — collect on each device, copy the small SQLite file over, merge
+# 1. git as the transport — no rsync, no ssh, no daemon (recommended)
+flightdeck collect
+flightdeck export --rows --out repo/devices/$(hostname -s).jsonl
+cd repo && git add -A && git commit -m sync && git push
+#    ...then anywhere you want the combined number:
+git pull && for f in devices/*.jsonl; do flightdeck merge "$f"; done && flightdeck total
+
+# 2. merge a database directly, if the machines can see each other
 flightdeck merge /path/to/other-machine-usage.db --device laptop
 
-# 2. pull raw transcripts off another host, then collect locally
+# 3. pull raw transcripts off another host, then collect locally
 scripts/grab-device.sh mb1.local mb1     # rsync over ssh into the archive
-
-# 3. sync the transcript directories (Syncthing et al) and collect on one box
 ```
+
+Option 1 needs no network code in flightdeck at all: each device writes **only its own file**, so two machines pushing at once touch different paths and git never has to merge anything. NDJSON rather than the SQLite file, because it diffs, compresses (~11:1 — a 15,500-event day is 6 MB raw, 675 KB gzipped), and survives a three-way merge if one ever does happen.
+
+`cwd` is **redacted by default** in `--rows`: working directories carry client and project names, and this file is built to leave the machine. `--include-cwd` opts back in for a private repo you control.
 
 Dedupe is structural, not heuristic: rows are keyed `(provider, session_id, event_id)`, so a session that exists on two devices — the common case, since transcripts sync — merges to one copy, and re-running a merge is a no-op. `--device` labels incoming rows `<device>:<root>` if you want per-machine reporting.
 
