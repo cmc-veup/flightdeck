@@ -44,6 +44,8 @@ def main(argv: list[str] | None = None) -> int:
     pb.add_argument("--out", required=True, help="directory to write badges/ and usage.svg into")
     pb.add_argument("--rank", type=int, default=None, help="current viberank position")
     pb.add_argument("--tier", default=None, help="viberank tier label, e.g. Supernova")
+    pb.add_argument("--rank-total", type=int, default=None,
+                    help="board size, so the badge reads '#11 of ~1,000' instead of jargon")
     pb.add_argument("--days", type=int, default=30, help="days of history in the chart")
 
     sub.add_parser("total", help="the honest estate total (per-event + archive, max per session)")
@@ -115,7 +117,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  profile  : {r['profileUrl']}")
     elif args.cmd == "badges":
         from . import badges
-        r = badges.run(args.out, rank=args.rank, tier=args.tier, days=args.days)
+        r = badges.run(args.out, rank=args.rank, tier=args.tier, days=args.days,
+                       rank_total=args.rank_total)
         m = r["metrics"]
         print(f"wrote {len(r['written'])} files to {args.out}")
         print(f"  tokens {m['tokens']:,} | subagent {m['subagent_pct']:.0f}%"

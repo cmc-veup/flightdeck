@@ -152,7 +152,7 @@ def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
 
 
 def build(conn, rank: int | None = None, tier: str | None = None,
-          window_days: int = 30) -> dict[str, dict]:
+          window_days: int = 30, rank_total: int | None = None) -> dict[str, dict]:
     m = collect_metrics(conn, rank, tier, window_days)
     out = {
         "tokens": _shield("tokens", _human(m["tokens"])),
@@ -163,7 +163,10 @@ def build(conn, rank: int | None = None, tier: str | None = None,
         "cache": _shield("cache", f"{m['cache_pct']:.0f}% of tokens"),
     }
     if rank:
-        out["viberank"] = _shield("viberank", f"#{rank}" + (f" · {tier}" if tier else ""))
+        # "Supernova" is viberank's own tier jargon and means nothing to a
+        # stranger; a denominator does. "#11 of ~1,000" is legible on sight.
+        msg = f"#{rank} of ~{rank_total:,}" if rank_total else f"#{rank}"
+        out["viberank"] = _shield("viberank", msg)
     return out
 
 
@@ -234,12 +237,13 @@ def svg_chart(series: list[tuple[str, int, int]], width: int = 800,
 
 
 def run(out_dir: str | Path, db_path=None, rank: int | None = None,
-        tier: str | None = None, days: int = 30) -> dict:
+        tier: str | None = None, days: int = 30,
+        rank_total: int | None = None) -> dict:
     conn = open_db(db_path)
     out = Path(out_dir).expanduser()
     (out / "badges").mkdir(parents=True, exist_ok=True)
     written = []
-    for name, payload in build(conn, rank, tier, days).items():
+    for name, payload in build(conn, rank, tier, days, rank_total).items():
         p = out / "badges" / f"{name}.json"
         p.write_text(json.dumps(payload))
         written.append(str(p))
