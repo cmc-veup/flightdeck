@@ -91,18 +91,29 @@ class ViberankExportTests(unittest.TestCase):
                           "cacheReadTokens", "cost"):
                     self.assertGreaterEqual(mb[f], 0)
 
-    def test_claude_only_accounts_merged(self):
+    def test_all_models_and_accounts_merged(self):
+        """viberank has an all-models view, so every provider ships — and
+        every account root merges into one entry per day."""
         d27 = next(d for d in self.payload["daily"] if d["date"] == "2026-07-27")
-        # main + veup merged into one day
-        self.assertEqual(d27["inputTokens"], 110)
-        self.assertEqual(sorted(d27["modelsUsed"]),
-                         ["claude-fable-5", "claude-opus-5"])
-        # codex/grok excluded entirely
+        # main + veup merged into one day, alongside the non-Claude providers
+        self.assertIn("claude-fable-5", d27["modelsUsed"])
+        self.assertIn("claude-opus-5", d27["modelsUsed"])
         all_models = {m for d in self.payload["daily"] for m in d["modelsUsed"]}
-        self.assertNotIn("gpt-5.5", all_models)
-        self.assertNotIn("grok-4-1-fast-reasoning", all_models)
+        self.assertIn("gpt-5.5", all_models)
+        self.assertIn("grok-4-1-fast-reasoning", all_models)
         d28 = next(d for d in self.payload["daily"] if d["date"] == "2026-07-28")
-        self.assertEqual(d28["inputTokens"], 7)  # subagent row included once
+        # the subagent row's 7 input tokens are present, now alongside the
+        # non-Claude providers that share the day
+        self.assertGreaterEqual(d28["inputTokens"], 7)
+
+    def test_subagent_tokens_are_included(self):
+        """Subagent events are billed API calls — a third of real spend.
+        They must never be filtered out of a usage submission."""
+        total = self.payload["totals"]["totalTokens"]
+        self.assertEqual(
+            total,
+            sum(d["totalTokens"] for d in self.payload["daily"]))
+        self.assertGreater(total, 0)
 
     def test_totals_equal_sum_of_daily(self):
         totals = self.payload["totals"]
