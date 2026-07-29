@@ -35,7 +35,7 @@ WHAT_LEAVES = (
 )
 
 
-def build(db_path=None) -> dict:
+def build(db_path=None, include_archive: bool = True) -> dict:
     conn = open_db(db_path)
     pricing = load_pricing(conn)
     cur = conn.execute(
@@ -87,6 +87,9 @@ def build(db_path=None) -> dict:
                 "cost": round(cost, 6),
             }
         )
+    if include_archive:
+        _add_archive(conn, days, pricing)
+
     conn.close()
 
     daily = []
@@ -106,6 +109,86 @@ def build(db_path=None) -> dict:
         totals["totalCost"] += d["totalCost"]
     totals["totalCost"] = round(totals["totalCost"], 6)
     return {"daily": daily, "totals": totals}
+
+
+def _add_archive(conn, days, pricing) -> None:
+    """Fold in recovered sessions whose transcripts no longer exist.
+
+    These are real, billed tokens — 27B of this estate — that per-event rows
+    cannot represent because the transcripts were deleted before anything
+    indexed them message-by-message. Two contributions, both additive and
+    neither able to double-count:
+
+      * sessions with NO per-event rows at all — added whole;
+      * sessions where the archive saw MORE than the per-event data (it
+        captured subagent transcripts the index missed) — only the positive
+        delta is added.
+
+    Precision caveat, stated plainly: an archive row is dated by its session,
+    so a multi-day session lands on its start date. Token totals are right;
+    day placement is coarser than the per-event portion.
+    """
+    tok = "input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens"
+    per_event, per_event_day = {}, {}
+    for sid, t, day in conn.execute(
+        f"SELECT session_id, SUM({tok}), MIN(substr(ts,1,10)) FROM usage_events GROUP BY session_id"
+    ):
+        per_event[sid[:11]] = per_event.get(sid[:11], 0) + (t or 0)
+        per_event_day.setdefault(sid[:11], day)
+
+    agg: dict = {}
+    try:
+        rows = conn.execute(
+            f"""SELECT source_file, day, model, input_tokens, output_tokens,
+                       cache_creation_tokens, cache_read_tokens
+                FROM archived_usage WHERE still_on_disk = 0"""
+        ).fetchall()
+    except Exception:
+        return
+    for source_file, day, model, inp, out, cc, cr in rows:
+        sid = (source_file.split("mc-cache:", 1)[1] if source_file.startswith("mc-cache:")
+               else Path(source_file).stem)[:11]
+        e = agg.setdefault(sid, {"day": day, "model": model, "i": 0, "o": 0, "cc": 0, "cr": 0})
+        e["i"] += inp or 0; e["o"] += out or 0
+        e["cc"] += cc or 0; e["cr"] += cr or 0
+        if not e["day"] and day:
+            e["day"] = day
+        if not e["model"] and model:
+            e["model"] = model
+
+    for sid, e in agg.items():
+        total = e["i"] + e["o"] + e["cc"] + e["cr"]
+        if not total:
+            continue
+        seen = per_event.get(sid, 0)
+        if seen >= total:
+            continue                      # per-event already covers it
+        scale = (total - seen) / total    # add only the shortfall
+        day = e["day"] or per_event_day.get(sid)
+        if not day or len(day) < 10:
+            continue
+        model = e["model"] or "claude-unknown"
+        inp, out = int(e["i"] * scale), int(e["o"] * scale)
+        cc, cr = int(e["cc"] * scale), int(e["cr"] * scale)
+        cost, _ = event_cost_usd(pricing, {
+            "model": model, "cost_micros": None,
+            "input_tokens": inp, "output_tokens": out,
+            "cache_creation_tokens": cc, "cache_read_tokens": cr,
+            "cache_5m_tokens": 0, "cache_1h_tokens": 0})
+        d = days.setdefault(day, {
+            "date": day, "inputTokens": 0, "outputTokens": 0,
+            "cacheCreationTokens": 0, "cacheReadTokens": 0,
+            "totalTokens": 0, "totalCost": 0.0,
+            "modelsUsed": [], "modelBreakdowns": []})
+        d["inputTokens"] += inp; d["outputTokens"] += out
+        d["cacheCreationTokens"] += cc; d["cacheReadTokens"] += cr
+        d["totalTokens"] += inp + out + cc + cr
+        d["totalCost"] += cost
+        d["modelsUsed"].append(model)
+        d["modelBreakdowns"].append({
+            "modelName": model, "inputTokens": inp, "outputTokens": out,
+            "cacheCreationTokens": cc, "cacheReadTokens": cr,
+            "cost": round(cost, 6)})
 
 
 def run(out: str | None = None) -> None:
