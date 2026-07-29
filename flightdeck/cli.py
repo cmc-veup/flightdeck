@@ -30,6 +30,8 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--json", action="store_true", help="robot JSON output")
     pr.add_argument("--now", default=None, help=argparse.SUPPRESS)  # fixed window end (ISO Z), for verification
 
+    sub.add_parser("total", help="the honest estate total (per-event + archive, max per session)")
+
     pd = sub.add_parser("doctor", help="data-source availability matrix")
     pd.add_argument("--json", action="store_true")
 
@@ -58,6 +60,10 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "report":
         from . import report
         report.run(since=args.since, as_json=args.json, now=args.now)
+    elif args.cmd == "total":
+        from . import reconcile
+        from .db import open_db
+        print(reconcile.render(reconcile.totals(open_db())))
     elif args.cmd == "doctor":
         from . import doctor
         doctor.run(as_json=args.json)

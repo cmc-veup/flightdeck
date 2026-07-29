@@ -7,8 +7,8 @@ inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens, totalCost,
 totalTokens, and a non-empty daily array; per-day `modelBreakdowns` are
 accepted and sanitized field-by-field.
 
-Flightdeck emits that exact shape from its own DB: Claude-provider rows only,
-all account roots merged, grouped by UTC date. These are the dedup-corrected
+Flightdeck emits that exact shape from its own DB: EVERY provider (viberank
+has an all-models view), all account roots merged, subagents included, grouped by UTC date. These are the dedup-corrected
 numbers — subagent events counted exactly once — which makes the entry
 defensible where naive scanners inflate their totals by double-counting
 fan-out transcripts.
@@ -45,7 +45,7 @@ def build(db_path=None) -> dict:
                SUM(cache_creation_tokens), SUM(cache_read_tokens),
                SUM(cache_5m_tokens), SUM(cache_1h_tokens)
         FROM usage_events
-        WHERE provider = 'claude' AND ts IS NOT NULL AND length(ts) >= 10
+        WHERE ts IS NOT NULL AND length(ts) >= 10
         GROUP BY day, model
         ORDER BY day, model
         """
