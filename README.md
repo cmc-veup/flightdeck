@@ -1,16 +1,16 @@
 <p align="center">
-  <img src="assets/hero.png" alt="Flightdeck: a LEGO control tower audits token bricks arriving from three provider aircraft" width="720">
+  <img src="assets/hero.png" alt="Flightdeck: a LEGO control tower audits token bricks arriving from a fleet of provider aircraft" width="720">
 </p>
 
 # Flightdeck
 
-A token-usage collector for local AI coding agents that reports numbers you can trust. It reads the raw transcripts that Claude Code, Codex CLI, and Grok CLI already write to disk, normalizes them into one SQLite database, and answers the only questions that matter: how many tokens, on which model, from which account, at what cost, and how fast is it burning.
+A token-usage collector for local AI coding agents that reports numbers you can trust. It reads the transcripts and usage stores that local agents already write to disk — Claude Code and every provider driven through its shell (DeepSeek, Ollama, Kimi, GLM, MiniMax, Qwen), plus Codex CLI, Grok CLI and Gemini — normalizes them into one SQLite database, and answers the only questions that matter: how many tokens, on which model, from which account, at what cost, and how fast is it burning.
 
 ## Why this exists
 
 Every usage dashboard already on this machine was wrong in a different way, and most of the failures share a root cause: they could not see the fan-out architecture the machine actually runs.
 
-- **Blind to subagents.** Tools that `rglob` every `*.jsonl` count a subagent transcript twice, once as its own session and once inside its parent, which makes the main-vs-subagent split unreportable. Flightdeck classifies every event (main / subagent / workflow subagent), attributes it to its parent session exactly once, and reports the architecture as a first-class dimension.
+- **Blind to the fan-out.** Earlier tools could not tell you what share of spend runs through subagents, which is the first number you would want. Flightdeck classifies every event as main, subagent, or workflow subagent and reports that split as a primary axis. (Attributing each event to its parent exactly once is how the classification stays honest — a transcript counted twice would corrupt both the total and the split. That is plumbing, not the feature.)
 - **Stale caches.** One collector read a Claude stats cache that had not updated since February and reported it as current.
 - **Unread Codex accounting.** Codex writes exact cumulative token counts (`token_count` events, including cached and reasoning tokens) into every rollout file. Prior tools counted characters instead, or read only the first 100 lines of each file.
 - **Invisible layouts.** Workflow subagents live under `subagents/workflows/wf_*/`. Roughly 2,000 transcript files, a whole tier of the fan-out, were invisible to every earlier scanner.
@@ -49,7 +49,7 @@ flightdeck export --viberank  # ccusage-shaped leaderboard payload (never auto-s
 
 ## Leaderboards
 
-`flightdeck export --viberank` writes a `ccusage --json`-shaped payload for [viberank](https://www.viberank.app), the public Claude Code usage leaderboard: Claude-provider rows only, all account roots merged into daily totals with per-model breakdowns and computed cost. Because these are the dedup-corrected numbers, the entry is defensible where naive scanners inflate totals by double-counting subagent transcripts. Flightdeck never submits anything on its own: it writes the file and prints the two manual paths (GitHub sign-in upload at viberank.app, or `npx viberank-cli`). If you do submit, the only data that leaves the machine is aggregate daily token counts, model names, and computed USD cost. No prompts, no file paths, no project or session names.
+`flightdeck export --viberank` writes a `ccusage --json`-shaped payload for [viberank](https://www.viberank.app), the public coding-agent usage leaderboard: every provider (viberank has an all-models view), all account roots merged into daily totals with per-model breakdowns and computed cost. Subagent tokens are included — they are billed API calls and roughly a third of this estate — and sessions recovered from the archive are folded in, so the payload reconciles to `flightdeck total` rather than to whatever happens to survive on disk. Flightdeck never submits anything on its own: it writes the file and prints the two manual paths (GitHub sign-in upload at viberank.app, or `npx viberank-cli`). If you do submit, the only data that leaves the machine is aggregate daily token counts, model names, and computed USD cost. No prompts, no file paths, no project or session names.
 
 ## Data sources
 
@@ -68,7 +68,9 @@ Any provider driven through a Claude Code shell (`CLAUDE_CONFIG_DIR` + `ANTHROPI
 
 Normalized rows land in `~/.flightdeck/usage.db` (schema in `flightdeck/db.py`). Flightdeck deliberately does not write into agentsview's `sessions.db`: that table has a foreign key into agentsview's own session index and cannot express provider, account root, sidechain attribution, or the cache TTL split.
 
-Pricing lives in a `pricing` table with per-Mtoken input, output, cache-read, and cache-write USD. Rows seeded from provider list prices carry `is_estimate = 0`; anything inferred (legacy tiers, gpt-5.x, grok, deepseek) is marked `is_estimate = 1` and flagged with `*` in reports. Grok costs are provider-reported and bypass the table entirely.
+Pricing lives in a `pricing` table with per-Mtoken input, output, cache-read, and cache-write USD. Rows seeded from provider list prices carry `is_estimate = 0`; anything inferred (legacy tiers, grok, deepseek, and the smaller Chinese-lab models) is marked `is_estimate = 1` and flagged with `*` in reports. Grok costs are provider-reported and bypass the table entirely.
+
+Rates are **effective-dated**: rows carry `valid_from` / `valid_to`, and a token is priced at the rate in force on the day it was spent, not today's rate. Anthropic list prices were verified against 17 archived snapshots of the pricing page spanning 2026-02-01 to 2026-07-28 — no Claude per-token price moved in that window, so the Opus family prices flat throughout. Sonnet 5 is the live case: its introductory $2/$10 runs through 2026-08-31, and the $3/$15 sticker applies from 2026-09-01.
 
 ## Verifying the numbers
 
