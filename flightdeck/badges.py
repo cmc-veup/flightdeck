@@ -73,6 +73,34 @@ def peak_concurrency(conn, day: str | None = None) -> tuple[int, int]:
     return best_sus, best_raw
 
 
+# The `provider` column records which CONFIG DIR a session ran in, not who made
+# the model — anything driven through a Claude Code shell reads as "claude" or
+# "deepseek". Counting it reported 4 vendors when the models name 9. Vendor is
+# a property of the model id, so derive it there.
+VENDOR_PREFIXES = (
+    ("claude", "Anthropic"), ("gpt", "OpenAI"), ("o1", "OpenAI"),
+    ("gemini", "Google"), ("grok", "xAI"), ("deepseek", "DeepSeek"),
+    ("glm", "Zhipu"), ("kimi", "Moonshot"), ("qwen", "Alibaba"),
+    ("minimax", "MiniMax"), ("llama", "Meta"), ("mistral", "Mistral"),
+)
+
+
+def vendor_of(model: str | None) -> str | None:
+    if not model:
+        return None
+    m = model.lower()
+    for prefix, name in VENDOR_PREFIXES:
+        if m.startswith(prefix):
+            return name
+    return None
+
+
+def count_vendors(conn) -> int:
+    rows = conn.execute(
+        "SELECT DISTINCT model FROM usage_events WHERE model IS NOT NULL").fetchall()
+    return len({v for (m,) in rows if (v := vendor_of(m))})
+
+
 def _window_start(conn, days: int) -> str:
     last = conn.execute(
         "SELECT MAX(substr(ts,1,10)) FROM usage_events WHERE ts IS NOT NULL").fetchone()[0]
@@ -91,8 +119,7 @@ def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
     models = conn.execute(
         "SELECT COUNT(DISTINCT model) FROM usage_events WHERE model IS NOT NULL"
         " AND model NOT IN ('<synthetic>','unknown','claude-unknown')").fetchone()[0]
-    providers = conn.execute(
-        "SELECT COUNT(DISTINCT provider) FROM usage_events").fetchone()[0]
+    vendors = count_vendors(conn)
     # Badges describe how the estate runs NOW. Today is partial and the
     # all-time figures are dragged down by months whose transcripts were
     # deleted before they could be indexed, so both use a trailing window.
@@ -115,7 +142,7 @@ def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
         "subagent_pct_alltime": (100.0 * est["per_event_subagent"] / measured) if measured else 0,
         "cache_pct": (100.0 * (est["cache_read"] + est["cache_write"]) / measured) if measured else 0,
         "models": models,
-        "providers": providers,
+        "vendors": vendors,
         "peak_sessions": sustained,
         "peak_day": peak_day,
         "window_days": window_days,
@@ -132,7 +159,7 @@ def build(conn, rank: int | None = None, tier: str | None = None,
         "subagents": _shield("subagent share", f"{m['subagent_pct']:.0f}%"),
         "swarm": _shield("swarm", f"{m['peak_sessions']} agents · {m['models']} models"),
         "peak": _shield(f"peak swarm ({window_days}d)", f"{m['peak_sessions']} concurrent agents"),
-        "models": _shield("models", f"{m['models']} · {m['providers']} providers"),
+        "models": _shield("models", f"{m['models']} models · {m['vendors']} labs"),
         "cache": _shield("cache", f"{m['cache_pct']:.0f}% of tokens"),
     }
     if rank:

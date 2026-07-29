@@ -118,3 +118,23 @@ def test_badges_never_publish_unsustained_concurrency(tmp_path):
     sustained, raw = badges.peak_concurrency(c, "2026-05-23")
     assert raw == 53, "raw count sees the artifact"
     assert sustained == 3, "the badge must report only sustained sessions"
+
+
+def test_vendor_count_comes_from_model_ids_not_config_dirs(tmp_path):
+    """`provider` records which config dir a session ran in, so a Kimi or GLM
+    session driven through a Claude Code shell reads as 'claude'. Counting it
+    said 4 vendors when the models named 9."""
+    from flightdeck import badges
+    db = tmp_path / "u.db"
+    c = open_db(db)
+    models = ["claude-opus-5", "gpt-5.5", "glm-5.1", "kimi-k2.5",
+              "qwen3-coder:480b", "minimax-m2.7", "gemini-3-flash", "grok-4",
+              "deepseek-v4-pro"]
+    c.executemany(
+        "INSERT INTO usage_events (provider,account_root,session_id,event_id,model,"
+        "input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens) "
+        "VALUES ('claude','main',?,?,?,1,0,0,0)",
+        [(f"s{i}", f"e{i}", m) for i, m in enumerate(models)])
+    c.commit()
+    assert c.execute("SELECT COUNT(DISTINCT provider) FROM usage_events").fetchone()[0] == 1
+    assert badges.count_vendors(c) == 9

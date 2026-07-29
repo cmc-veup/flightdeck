@@ -119,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
         m = r["metrics"]
         print(f"wrote {len(r['written'])} files to {args.out}")
         print(f"  tokens {m['tokens']:,} | subagent {m['subagent_pct']:.0f}%"
-              f" | cache {m['cache_pct']:.0f}% | {m['models']} models / {m['providers']} providers")
+              f" | cache {m['cache_pct']:.0f}% | {m['models']} models / {m['vendors']} labs")
         print(f"  swarm  {m['peak_sessions']} sustained concurrent sessions on {m['peak_day']}")
         print(f"  chart  {r['days_charted']} days -> {args.out}/usage.svg")
     elif args.cmd == "total":
