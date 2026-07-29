@@ -40,6 +40,12 @@ def main(argv: list[str] | None = None) -> int:
     ps.add_argument("--payload", default=None, help="path to the export (default ~/.flightdeck/viberank-cc.json)")
     ps.add_argument("--yes", action="store_true", help="actually send; without it, prints what would be sent")
 
+    pb = sub.add_parser("badges", help="shields.io endpoints + self-updating SVG chart for a profile README")
+    pb.add_argument("--out", required=True, help="directory to write badges/ and usage.svg into")
+    pb.add_argument("--rank", type=int, default=None, help="current viberank position")
+    pb.add_argument("--tier", default=None, help="viberank tier label, e.g. Supernova")
+    pb.add_argument("--days", type=int, default=30, help="days of history in the chart")
+
     sub.add_parser("total", help="the honest estate total (per-event + archive, max per session)")
 
     pd = sub.add_parser("doctor", help="data-source availability matrix")
@@ -107,6 +113,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\n  submitted: {r.get('message') or r}")
             if r.get("profileUrl"):
                 print(f"  profile  : {r['profileUrl']}")
+    elif args.cmd == "badges":
+        from . import badges
+        r = badges.run(args.out, rank=args.rank, tier=args.tier, days=args.days)
+        m = r["metrics"]
+        print(f"wrote {len(r['written'])} files to {args.out}")
+        print(f"  tokens {m['tokens']:,} | subagent {m['subagent_pct']:.0f}%"
+              f" | cache {m['cache_pct']:.0f}% | {m['models']} models / {m['providers']} providers")
+        print(f"  swarm  {m['peak_sessions']} sustained concurrent sessions on {m['peak_day']}")
+        print(f"  chart  {r['days_charted']} days -> {args.out}/usage.svg")
     elif args.cmd == "total":
         from . import reconcile
         from .db import open_db

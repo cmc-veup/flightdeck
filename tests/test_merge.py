@@ -92,3 +92,29 @@ def test_local_mirror_is_not_scanned_as_a_device(tmp_path):
         os.environ.pop("TRANSCRIPT_ARCHIVE", None)
     assert "laptop:claude-main" in labels
     assert not any("claude-deepseek" in l and ":" not in l for l in labels - {"main"})
+
+
+def test_badges_never_publish_unsustained_concurrency(tmp_path):
+    """The 2026-05-23 artifact: 1,000 sessions each with ONE event. A badge
+    must count only sustained sessions, or it publishes a number that breaks
+    under the first question asked about it."""
+    from flightdeck import badges
+    db = tmp_path / "u.db"
+    c = open_db(db)
+    rows = []
+    # 50 one-shot sessions in one bucket (artifact) ...
+    for i in range(50):
+        rows.append(("claude", "main", f"ghost{i}", f"e{i}", 1, 0, 0, 0))
+    # ... plus 3 sessions that actually sustained work
+    for s in range(3):
+        for e in range(6):
+            rows.append(("claude", "main", f"real{s}", f"r{s}-{e}", 1, 0, 0, 0))
+    c.executemany(
+        "INSERT INTO usage_events (provider,account_root,session_id,event_id,"
+        "input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens) "
+        "VALUES (?,?,?,?,?,?,?,?)", rows)
+    c.execute("UPDATE usage_events SET ts='2026-05-23T18:10:00.000Z'")
+    c.commit()
+    sustained, raw = badges.peak_concurrency(c, "2026-05-23")
+    assert raw == 53, "raw count sees the artifact"
+    assert sustained == 3, "the badge must report only sustained sessions"
