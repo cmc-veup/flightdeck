@@ -77,6 +77,18 @@ PRICING_SEED: list[tuple[str, float, float, float, float, int, str]] = [
     ("gpt-5",            1.25, 10.0, 0.125, 0.0,  1, "OpenAI gpt-5.x est.; cached input 0.1x; no write charge"),
     ("grok",             0.20,  0.50, 0.05, 0.0,  1, "estimate; grok db reports cost_micros directly"),
     ("deepseek",         0.28,  1.10, 0.028, 0.0, 1, "deepseek-chat est."),
+    # Recovered archive rows carry no model id. They are entirely Feb-Mar 2026,
+    # where claude-opus-4-6 was 88% of known Claude tokens — so the opus-4 tier
+    # is the evidence for them, not a guess. Without this row 12.19B tokens
+    # silently priced at $0 and the estate read $11k light.
+    ("claude-unknown",   5.0, 25.0, 0.50,  6.25, 1, "recovered rows w/o model; era's dominant tier (opus-4-6)"),
+    ("glm",              0.6,  2.2, 0.06,  0.0,  1, "Zhipu GLM est."),
+    ("kimi",             0.6,  2.5, 0.06,  0.0,  1, "Moonshot Kimi est."),
+    ("minimax",          0.3,  1.2, 0.03,  0.0,  1, "MiniMax est."),
+    ("gemini-3-flash",   0.3,  2.5, 0.03,  0.0,  1, "Gemini flash est."),
+    ("gemini-3.1-pro",   1.25,10.0, 0.125, 0.0,  1, "Gemini pro est."),
+    ("qwen",             0.0,  0.0, 0.0,   0.0,  0, "local via ollama - genuinely $0"),
+    ("<synthetic>",      0.0,  0.0, 0.0,   0.0,  0, "not a model - Claude Code internal marker"),
     ("ollama",            0.0,   0.0, 0.0,  0.0,  0, "local inference, $0"),
 ]
 
