@@ -69,3 +69,26 @@ def test_row_roundtrip_dedupes_across_devices(tmp_path):
     s = rows.import_rows(f, db_path=a)
     assert s["new_events"] == 1 and s["new_tokens"] == 100
     assert rows.import_rows(f, db_path=a)["new_events"] == 0
+
+
+def test_local_mirror_is_not_scanned_as_a_device(tmp_path):
+    """The archive root holds THIS machine's mirror. Scanning it re-ingests
+    local transcripts under a different provider label, which defeats the
+    primary key and double-counts. Only devices/<name>/ may be scanned."""
+    from flightdeck import paths
+    (tmp_path / ".claude" / "projects").mkdir(parents=True)
+    arch = tmp_path / "transcript-archive"
+    mirror = arch / "claude-deepseek" / "projects"        # local mirror
+    mirror.mkdir(parents=True)
+    (mirror / "s.jsonl").write_text("{}")
+    other = arch / "devices" / "laptop" / "claude-main"   # a real other device
+    other.mkdir(parents=True)
+    (other / "s.jsonl").write_text("{}")
+    import os
+    os.environ["TRANSCRIPT_ARCHIVE"] = str(arch)
+    try:
+        labels = {label for _p, _prov, label in paths.discover_claude_roots(tmp_path)}
+    finally:
+        os.environ.pop("TRANSCRIPT_ARCHIVE", None)
+    assert "laptop:claude-main" in labels
+    assert not any("claude-deepseek" in l and ":" not in l for l in labels - {"main"})

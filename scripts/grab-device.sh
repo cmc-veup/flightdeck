@@ -15,7 +15,7 @@ set -uo pipefail
 
 MB1="${1:-}"
 REMOTE_USER="${2:-mchack}"
-ARCHIVE="${TRANSCRIPT_ARCHIVE:-$HOME/transcript-archive}/mb1"
+ARCHIVE="${TRANSCRIPT_ARCHIVE:-$HOME/transcript-archive}/devices/${2:-mb1}"
 
 if [ -z "$MB1" ]; then
   echo "usage: $0 <mb1-hostname-or-ip> [remote-user]   (default user: mchack)" >&2

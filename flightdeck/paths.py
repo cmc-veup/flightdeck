@@ -68,14 +68,17 @@ def discover_claude_roots(home: Path | None = None) -> list[tuple[Path, str, str
     # <archive>/<device>/<tree>). Ingesting them is safe by construction:
     # identical events collide on the (provider, session_id, event_id) primary
     # key and are ignored, so a session synced to two machines counts once.
+    # ONLY under <archive>/devices/ — the archive root also holds this machine's
+    # own append-only mirror, and scanning that re-ingests local transcripts
+    # under a different provider label, which defeats the primary key and
+    # double-counts them. Other devices go in devices/<name>/ (grab-device.sh).
     archive = Path(os.environ.get("TRANSCRIPT_ARCHIVE", str(h / "transcript-archive")))
-    for device in sorted(archive.glob("*")):
+    for device in sorted((archive / "devices").glob("*")):
         if not device.is_dir() or device.name.startswith("_"):
             continue
-        # a device dir holds tree subdirs; a local mirror holds jsonl directly
         for tree in sorted(device.glob("*")):
             if tree.is_dir() and not tree.name.startswith("_") and any(tree.rglob("*.jsonl")):
-                found[tree] = ("claude", f"{device.name}-{tree.name}")
+                found[tree] = ("claude", f"{device.name}:{tree.name}")
 
     return [(p, prov, label) for p, (prov, label) in sorted(found.items())]
 
