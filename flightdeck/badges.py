@@ -72,22 +72,42 @@ def swarm_day(conn, day: str) -> dict:
     rows = conn.execute(
         "SELECT session_id, ts FROM usage_events WHERE ts LIKE ?", (day + "%",)).fetchall()
     if not rows:
-        return {"agents": 0, "peak": 0, "held_50": 0, "held_100": 0, "fragmented": False}
+        return {"agents": 0, "peak": 0, "peak_hour": 0, "held_50": 0,
+                "held_100": 0, "fragmented": False}
     per = collections.Counter(s for s, _ in rows)
     counts = sorted(per.values())
     median = counts[len(counts) // 2]
     fragmented = median <= FRAGMENT_MEDIAN
-    buckets: dict[str, set] = collections.defaultdict(set)
-    for sid, ts in rows:
-        buckets[ts[:15]].add(sid)          # ts[:15] == a 10-minute bucket
-    sizes = sorted((len(v) for v in buckets.values()), reverse=True)
+
+    def widest(minutes: int) -> int:
+        b: dict[str, set] = collections.defaultdict(set)
+        for sid, ts in rows:
+            # ts is ISO; bucket on the hour plus a floored minute
+            mm = int(ts[14:16]) // minutes * minutes
+            b[f"{ts[:14]}{mm:02d}"].add(sid)
+        return max((len(v) for v in b.values()), default=0)
+
+    sizes = sorted((len(v) for v in
+                    _bucket_sets(rows, 10).values()), reverse=True)
     return {
         "agents": len(per),
+        # Agents active in a 10-minute window. Named, because the figure roughly
+        # doubles per window width: this swarm's median agent lives 3.7 minutes,
+        # so an instantaneous count catches only those mid-breath.
         "peak": 0 if fragmented else (sizes[0] if sizes else 0),
+        "peak_hour": 0 if fragmented else widest(60),
         "held_50": 0 if fragmented else sum(1 for x in sizes if x >= 50) * 10,
         "held_100": 0 if fragmented else sum(1 for x in sizes if x >= 100) * 10,
         "fragmented": fragmented,
     }
+
+
+def _bucket_sets(rows, minutes: int):
+    b: dict[str, set] = collections.defaultdict(set)
+    for sid, ts in rows:
+        mm = int(ts[14:16]) // minutes * minutes
+        b[f"{ts[:14]}{mm:02d}"].add(sid)
+    return b
 
 
 def peak_concurrency(conn, day: str | None = None) -> tuple[int, int]:
@@ -311,6 +331,7 @@ def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
         "peak_day": peak_day,
         "swarm_agents": best.get("agents", 0),
         "swarm_peak": sustained,
+        "swarm_peak_hour": best.get("peak_hour", 0),
         "swarm_peak_day": sustained_day,
         "swarm_held_50": best.get("held_50", 0),
         "swarm_held_100": best.get("held_100", 0),
