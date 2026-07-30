@@ -46,10 +46,32 @@ CREATE TABLE IF NOT EXISTS archived_usage (
     cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
     cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
     messages      INTEGER NOT NULL DEFAULT 0,
-    still_on_disk INTEGER NOT NULL DEFAULT 0
+    still_on_disk INTEGER NOT NULL DEFAULT 0,
+    -- Cost the SOURCE archive recorded, in micros. Present when the archive
+    -- computed spend at the time; absent otherwise.
+    --
+    -- This matters most where `model` is NULL. The mb1 checkpoint carries no
+    -- model at all, so those tokens would otherwise fall to a guessed tier —
+    -- and that guess is badly wrong: it prices Feb–Mar 2026 cache reads at the
+    -- Opus 4.5+ rate ($0.50/MTok) when Opus 4.1 rates ($1.50) were in force,
+    -- understating 19.14B tokens by roughly 64%. A cost recorded when the
+    -- tokens were spent is effective-dated by construction.
+    cost_micros   INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_archived_day ON archived_usage(day);
 """
+
+# Columns added after the table shipped. SQLite has no IF NOT EXISTS for
+# ADD COLUMN, so this is applied defensively against existing databases.
+MIGRATIONS = [("cost_micros", "ALTER TABLE archived_usage ADD COLUMN cost_micros INTEGER")]
+
+
+def migrate(conn) -> None:
+    have = {r[1] for r in conn.execute("PRAGMA table_info(archived_usage)")}
+    for col, ddl in MIGRATIONS:
+        if col not in have:
+            conn.execute(ddl)
+    conn.commit()
 
 
 def classify(path: str, rec: dict) -> tuple[str, str, int]:
@@ -101,15 +123,20 @@ def import_checkpoint(db_path=None, checkpoint: Path | None = None) -> dict:
             """INSERT INTO archived_usage
                (source_file, origin, machine, provider, account_root, project, model,
                 day, is_sidechain, input_tokens, output_tokens,
-                cache_creation_tokens, cache_read_tokens, messages, still_on_disk)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                cache_creation_tokens, cache_read_tokens, messages, still_on_disk,
+                cost_micros)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(source_file) DO UPDATE SET
-                 still_on_disk=excluded.still_on_disk""",
+                 still_on_disk=excluded.still_on_disk,
+                 cost_micros=COALESCE(excluded.cost_micros, archived_usage.cost_micros)""",
             (path, "usage-checkpoint", machine,
              "deepseek" if account_root == "deepseek" else "claude",
              account_root, rec.get("project"), rec.get("model"),
              (rec.get("date") or "")[:10], sidechain,
-             inp, out, cw, cr, rec.get("messages") or 0, on_disk),
+             inp, out, cw, cr, rec.get("messages") or 0, on_disk,
+             # The archive priced this session when it ran. Keep that number:
+             # it beats any tier we could infer, and it is dated by construction.
+             int(round(float(rec["cost"]) * 1e6)) if rec.get("cost") is not None else None),
         )
         rows += 1
         total = inp + out + cw + cr

@@ -140,17 +140,20 @@ def _add_archive(conn, days, pricing) -> None:
     try:
         rows = conn.execute(
             f"""SELECT source_file, day, model, input_tokens, output_tokens,
-                       cache_creation_tokens, cache_read_tokens
+                       cache_creation_tokens, cache_read_tokens, cost_micros
                 FROM archived_usage WHERE still_on_disk = 0"""
         ).fetchall()
     except Exception:
         return
-    for source_file, day, model, inp, out, cc, cr in rows:
+    for source_file, day, model, inp, out, cc, cr, cost_micros in rows:
         sid = (source_file.split("mc-cache:", 1)[1] if source_file.startswith("mc-cache:")
                else Path(source_file).stem)[:11]
-        e = agg.setdefault(sid, {"day": day, "model": model, "i": 0, "o": 0, "cc": 0, "cr": 0})
+        e = agg.setdefault(sid, {"day": day, "model": model, "i": 0, "o": 0,
+                                 "cc": 0, "cr": 0, "cost": None})
         e["i"] += inp or 0; e["o"] += out or 0
         e["cc"] += cc or 0; e["cr"] += cr or 0
+        if cost_micros is not None:
+            e["cost"] = (e["cost"] or 0) + cost_micros
         if not e["day"] and day:
             e["day"] = day
         if not e["model"] and model:
@@ -170,8 +173,15 @@ def _add_archive(conn, days, pricing) -> None:
         model = e["model"] or "claude-unknown"
         inp, out = int(e["i"] * scale), int(e["o"] * scale)
         cc, cr = int(e["cc"] * scale), int(e["cr"] * scale)
+        # A cost the archive recorded beats anything we can infer, and matters
+        # most where `model` is NULL: the mb1 checkpoint has no model, so those
+        # tokens would fall to a guessed tier that prices Feb–Mar 2026 cache
+        # reads at the Opus 4.5+ rate when Opus 4.1 rates applied — 64% low
+        # across 19.14B tokens. Scaled by the same shortfall factor as the
+        # tokens so the two can never disagree.
+        recorded = int(e["cost"] * scale) if e.get("cost") is not None else None
         cost, _ = event_cost_usd(pricing, {
-            "model": model, "cost_micros": None,
+            "model": model, "cost_micros": recorded,
             "input_tokens": inp, "output_tokens": out,
             "cache_creation_tokens": cc, "cache_read_tokens": cr,
             "cache_5m_tokens": 0, "cache_1h_tokens": 0})
