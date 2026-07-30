@@ -175,9 +175,15 @@ def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
         if s["agents"] > (best.get("agents") or 0):
             best, peak_day = s, d
         sustained = max(sustained, s["peak"])
-    wave_days = sum(1 for (d,) in conn.execute(
+    # The elastic RANGE is the story, not a single maximum. Between waves the
+    # swarm sits at zero — nothing idles, nothing is paid for. During one it
+    # runs in the hundreds. Quote both ends.
+    wave_sizes = [s["agents"] for (d,) in conn.execute(
         "SELECT DISTINCT substr(ts,1,10) FROM usage_events WHERE ts >= ?", (since,))
-        if swarm_day(conn, d)["peak"] >= 50)
+        if (s := swarm_day(conn, d))["peak"] >= 50]
+    wave_days = len(wave_sizes)
+    wave_min = min(wave_sizes) if wave_sizes else 0
+    wave_max = max(wave_sizes) if wave_sizes else 0
     win = conn.execute(
         f"""SELECT COALESCE(SUM(CASE WHEN is_sidechain>0 THEN {tok} ELSE 0 END),0),
                    COALESCE(SUM({tok}),0)
@@ -286,6 +292,8 @@ def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
         "swarm_held_50": best.get("held_50", 0),
         "swarm_held_100": best.get("held_100", 0),
         "wave_days": wave_days,
+        "wave_min": wave_min,
+        "wave_max": wave_max,
         "window_days": window_days,
         "rank": rank,
         "tier": tier,
