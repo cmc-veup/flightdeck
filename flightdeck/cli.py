@@ -153,7 +153,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  recovered (deleted): {m['recovered_tokens']:,} tokens")
             total += m["recovered_tokens"]
         from .db import open_db
-        t = archive.archive_totals(open_db())
+        conn = open_db()
+        split = archive.apportion_models(conn)
+        if split:
+            blk = sum(split.values()) or 1
+            print("  model mix applied from the same window's surviving rows: "
+                  + ", ".join(f"{m.split('-2025')[0]} {100*v/blk:.0f}%"
+                              for m, v in list(split.items())[:3]))
+        t = archive.archive_totals(conn)
         print(f"ARCHIVE TOTAL: {t['tokens']:,} tokens across {t['files']:,} vanished transcripts")
     elif args.cmd == "export":
         if args.rows:

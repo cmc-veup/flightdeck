@@ -66,6 +66,50 @@ CREATE INDEX IF NOT EXISTS idx_archived_day ON archived_usage(day);
 MIGRATIONS = [("cost_micros", "ALTER TABLE archived_usage ADD COLUMN cost_micros INTEGER")]
 
 
+def apportion_models(conn, origin: str = "usage-checkpoint") -> dict:
+    """Give model-less archive rows the model mix of their own window.
+
+    Recovered transcripts carry token counts but no model. The surviving
+    per-event rows from the same dates are the best prior we have, so the block
+    is split by their token shares. Assigning it all to the dominant model
+    instead overstates by ~9%, because the window also ran Haiku at a fifth of
+    the price.
+
+    Whole rows go to whichever model is furthest below its target share, so
+    totals stay exact and the result is deterministic.
+    """
+    tok = ("input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens")
+    win = conn.execute(
+        f"""SELECT MIN(day), MAX(day) FROM archived_usage WHERE origin=?""",
+        (origin,)).fetchone()
+    if not win or not win[0]:
+        return {}
+    mix = [(m, t) for m, t in conn.execute(
+        f"""SELECT model, SUM({tok}) FROM usage_events
+             WHERE substr(ts,1,10) BETWEEN ? AND ?
+               AND model IS NOT NULL AND model LIKE 'claude-%'
+             GROUP BY 1 HAVING SUM({tok}) > 0""", win)]
+    if not mix:
+        return {}
+    total = sum(t for _, t in mix)
+    share = {m: t / total for m, t in mix}
+
+    rows = conn.execute(
+        f"""SELECT source_file, {tok} FROM archived_usage
+             WHERE origin=? ORDER BY source_file""", (origin,)).fetchall()
+    blk = sum(t for _, t in rows) or 1
+    target = {m: s * blk for m, s in share.items()}
+    got = {m: 0.0 for m in share}
+    updates = []
+    for sf, t in rows:
+        m = max(share, key=lambda k: target[k] - got[k])
+        got[m] += t
+        updates.append((m, sf))
+    conn.executemany("UPDATE archived_usage SET model=? WHERE source_file=?", updates)
+    conn.commit()
+    return {m: got[m] for m in sorted(got, key=lambda k: -got[k])}
+
+
 def migrate(conn) -> None:
     have = {r[1] for r in conn.execute("PRAGMA table_info(archived_usage)")}
     for col, ddl in MIGRATIONS:
