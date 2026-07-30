@@ -184,6 +184,15 @@ def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
     wave_days = len(wave_sizes)
     wave_min = min(wave_sizes) if wave_sizes else 0
     wave_max = max(wave_sizes) if wave_sizes else 0
+    # Ceiling is all-time, not windowed: it is a capability, and capability does
+    # not expire because last month was quiet. Typical range stays windowed,
+    # because that IS what it currently does.
+    wave_ceiling = wave_max
+    for (d,) in conn.execute(
+            "SELECT DISTINCT substr(ts,1,10) FROM usage_events WHERE ts IS NOT NULL"):
+        n = swarm_day(conn, d)["agents"]
+        if n > wave_ceiling:
+            wave_ceiling = n
     win = conn.execute(
         f"""SELECT COALESCE(SUM(CASE WHEN is_sidechain>0 THEN {tok} ELSE 0 END),0),
                    COALESCE(SUM({tok}),0)
@@ -293,6 +302,7 @@ def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
         "swarm_held_100": best.get("held_100", 0),
         "wave_days": wave_days,
         "wave_min": wave_min,
+        "wave_ceiling": wave_ceiling,
         "wave_max": wave_max,
         "window_days": window_days,
         "rank": rank,
