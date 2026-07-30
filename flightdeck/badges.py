@@ -33,7 +33,8 @@ from .db import load_pricing, match_price
 from .reconcile import totals as estate_totals
 
 SHIELD_COLOR = "2b2b2b"          # matches the flat-square dark convention
-SUSTAINED_EVENTS = 5             # a "real" concurrent session, not a one-shot
+SUSTAINED_EVENTS = 5             # legacy: peak_concurrency() only
+FRAGMENT_MEDIAN = 2              # a day at/below this median is recovery fragments
 
 
 def _shield(label: str, message: str, color: str = SHIELD_COLOR) -> dict:
@@ -53,35 +54,39 @@ def swarm_day(conn, day: str) -> dict:
 
     Peak-concurrency-in-a-bucket is the wrong instrument on its own. A swarm
     scales to a wave of work, runs it, contracts, and scales again — that
-    breathing IS the operating pattern, and an agent that finishes its task in
-    twelve minutes is a good agent. A point-in-time maximum penalises exactly
-    the behaviour you want and hides the throughput.
+    breathing IS the operating pattern. An agent that finishes its task in one
+    exchange is still an agent, so no session is filtered out for being brief.
 
-    So report three things together:
-      agents   - distinct sustained sessions that ran that day (throughput)
-      peak     - most concurrent in any 10-minute bucket (amplitude)
-      held_*   - minutes spent at or above a threshold (endurance)
+    Returns agents (throughput), peak (amplitude), held_* (endurance), and
+    `fragmented` — see below.
 
-    `held` is what separates a spike from a wave. 2026-07-30 peaked at 115 but
-    held 100+ for an hour and 50+ for 100 minutes; calling that a burst would
-    be as wrong as calling a single bucket sustained.
+    FRAGMENTED DAYS
+    Filtering *sessions* by event count was the wrong guard. It threw away real
+    one-shot agents to dodge a problem that lives at the DAY level: months
+    recovered from a partial index yield one salvaged message per session, so
+    2026-05-23 shows 10,600 "sessions" at 1.06 events each and an apparent
+    1,000 concurrent. A day with intact transcripts runs 12-21 events per
+    session. So the discriminator is the day's median, not any session's count —
+    a fragmented day cannot report concurrency at all, and says so.
     """
     rows = conn.execute(
         "SELECT session_id, ts FROM usage_events WHERE ts LIKE ?", (day + "%",)).fetchall()
     if not rows:
-        return {"agents": 0, "peak": 0, "held_50": 0, "held_100": 0}
+        return {"agents": 0, "peak": 0, "held_50": 0, "held_100": 0, "fragmented": False}
     per = collections.Counter(s for s, _ in rows)
-    real = {s for s, n in per.items() if n >= SUSTAINED_EVENTS}
+    counts = sorted(per.values())
+    median = counts[len(counts) // 2]
+    fragmented = median <= FRAGMENT_MEDIAN
     buckets: dict[str, set] = collections.defaultdict(set)
     for sid, ts in rows:
-        if sid in real:
-            buckets[ts[:15]].add(sid)          # ts[:15] == a 10-minute bucket
+        buckets[ts[:15]].add(sid)          # ts[:15] == a 10-minute bucket
     sizes = sorted((len(v) for v in buckets.values()), reverse=True)
     return {
-        "agents": len(real),
-        "peak": sizes[0] if sizes else 0,
-        "held_50": sum(1 for x in sizes if x >= 50) * 10,
-        "held_100": sum(1 for x in sizes if x >= 100) * 10,
+        "agents": len(per),
+        "peak": 0 if fragmented else (sizes[0] if sizes else 0),
+        "held_50": 0 if fragmented else sum(1 for x in sizes if x >= 50) * 10,
+        "held_100": 0 if fragmented else sum(1 for x in sizes if x >= 100) * 10,
+        "fragmented": fragmented,
     }
 
 
@@ -176,6 +181,8 @@ def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
             "SELECT DISTINCT substr(ts,1,10) FROM usage_events"
             " WHERE ts >= ? ORDER BY 1", (since,)):
         s = swarm_day(conn, d)
+        if s["fragmented"]:
+            continue
         if s["agents"] > (best.get("agents") or 0):
             best, peak_day = s, d
         if s["peak"] > sustained:
@@ -195,7 +202,8 @@ def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
     wave_ceiling = wave_max
     for (d,) in conn.execute(
             "SELECT DISTINCT substr(ts,1,10) FROM usage_events WHERE ts IS NOT NULL"):
-        n = swarm_day(conn, d)["agents"]
+        sd = swarm_day(conn, d)
+        n = 0 if sd["fragmented"] else sd["agents"]
         if n > wave_ceiling:
             wave_ceiling = n
     win = conn.execute(
