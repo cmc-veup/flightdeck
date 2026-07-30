@@ -167,14 +167,19 @@ def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
     # 503 agents through the queue is a bigger swarm day than one that briefly
     # touched a higher number, and it is the figure that survives the
     # scale-up/contract cycle.
-    peak_day, sustained, best = None, 0, {}
+    # Two DIFFERENT days, and conflating them understates. The day that ran the
+    # most agents is not necessarily the day that ran the most at once: 2026-06-04
+    # put 620 agents through the queue but peaked at 26 concurrent, while
+    # 2026-07-28 peaked at 123 off 316 agents. Track each separately.
+    peak_day, sustained, best, sustained_day = None, 0, {}, None
     for (d,) in conn.execute(
             "SELECT DISTINCT substr(ts,1,10) FROM usage_events"
             " WHERE ts >= ? ORDER BY 1", (since,)):
         s = swarm_day(conn, d)
         if s["agents"] > (best.get("agents") or 0):
             best, peak_day = s, d
-        sustained = max(sustained, s["peak"])
+        if s["peak"] > sustained:
+            sustained, sustained_day = s["peak"], d
     # The elastic RANGE is the story, not a single maximum. Between waves the
     # swarm sits at zero — nothing idles, nothing is paid for. During one it
     # runs in the hundreds. Quote both ends.
@@ -297,7 +302,8 @@ def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
         "peak_sessions": sustained,
         "peak_day": peak_day,
         "swarm_agents": best.get("agents", 0),
-        "swarm_peak": best.get("peak", 0),
+        "swarm_peak": sustained,
+        "swarm_peak_day": sustained_day,
         "swarm_held_50": best.get("held_50", 0),
         "swarm_held_100": best.get("held_100", 0),
         "wave_days": wave_days,
