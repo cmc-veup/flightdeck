@@ -29,6 +29,7 @@ import sqlite3
 from pathlib import Path
 
 from .db import open_db
+from .db import load_pricing, match_price
 from .reconcile import totals as estate_totals
 
 SHIELD_COLOR = "2b2b2b"          # matches the flat-square dark convention
@@ -113,6 +114,7 @@ def _window_start(conn, days: int) -> str:
 
 def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
                     window_days: int = 30) -> dict:
+    pricing_rows = load_pricing(conn)
     tok = "input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens"
     est = estate_totals(conn)
     measured = est["per_event_main"] + est["per_event_subagent"]
@@ -136,14 +138,56 @@ def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
                    COALESCE(SUM({tok}),0)
             FROM usage_events WHERE ts >= ?""", (since,)).fetchone()
     recent_sub_pct = (100.0 * win[0] / win[1]) if win[1] else 0.0
-    days_covered = conn.execute(
+    # ACTIVE days, not calendar days — 48 days in the span have no rows at all.
+    # Callers must say "active", and must alert if this figure ever FALLS:
+    # by this project's own reasoning a decreasing total is proof of deletion.
+    days_active = conn.execute(
         "SELECT COUNT(DISTINCT substr(ts,1,10)) FROM usage_events").fetchone()[0]
+    span = conn.execute(
+        "SELECT MIN(substr(ts,1,10)), MAX(substr(ts,1,10)) FROM usage_events").fetchone()
+
+    # How much of the estate is priced from a real rate card. The README used
+    # to claim this existed; it did not. An unmatched model returns $0 and
+    # would otherwise masquerade as thrift.
+    unpriced = estimated = priced = 0
+    for m, t, ts in conn.execute(
+            f"""SELECT model, SUM({tok}), MAX(ts) FROM usage_events
+                 WHERE model IS NOT NULL AND model <> '<synthetic>'
+                 GROUP BY 1"""):
+        p = match_price(pricing_rows, m, ts)
+        if p is None:
+            unpriced += t or 0
+        elif p[5]:
+            estimated += t or 0
+        else:
+            priced += t or 0
+    priced_total = unpriced + estimated + priced
+
+    # Concentration matters more than the model count: 24 models across 9 labs
+    # is only diversity if the spend is spread.
+    top_vendor_pct = 0.0
+    vend: dict[str, int] = {}
+    for m, t in conn.execute(
+            f"""SELECT model, SUM({tok}) FROM usage_events
+                 WHERE model IS NOT NULL GROUP BY 1"""):
+        vend[vendor_of(m)] = vend.get(vendor_of(m), 0) + (t or 0)
+    if vend:
+        top_vendor_pct = 100.0 * max(vend.values()) / max(sum(vend.values()), 1)
+
     return {
         "tokens": est["total"],
-        "days_covered": days_covered,
+        "days_active": days_active,
+        "days_covered": days_active,          # legacy alias
+        "span_start": span[0], "span_end": span[1],
         "subagent_pct": recent_sub_pct,
         "subagent_pct_alltime": (100.0 * est["per_event_subagent"] / measured) if measured else 0,
+        # Reads only. Cache WRITES are not "served from" cache and cost a
+        # premium, so folding them in overstates the saving.
+        "cache_read_pct": (100.0 * est["cache_read"] / measured) if measured else 0,
         "cache_pct": (100.0 * (est["cache_read"] + est["cache_write"]) / measured) if measured else 0,
+        "unpriced_pct": (100.0 * unpriced / priced_total) if priced_total else 0,
+        "estimated_pct": (100.0 * estimated / priced_total) if priced_total else 0,
+        "top_vendor_pct": top_vendor_pct,
         "models": models,
         "vendors": vendors,
         "peak_sessions": sustained,
