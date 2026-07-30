@@ -172,15 +172,42 @@ def build(conn, rank: int | None = None, tier: str | None = None,
 
 
 def daily_series(conn, days: int = 30) -> list[tuple[str, int, int]]:
-    """[(day, main_tokens, subagent_tokens)] for the last `days` active days."""
+    """[(day, main_tokens, subagent_tokens)] for the last `days` active days.
+
+    Includes recovered archive rows, not just per-event. Reading usage_events
+    alone undercounts Feb-Jun by 47-70%, because those months' transcripts were
+    deleted and only survive in the archives — the estate TOTAL already folds
+    them in, so a per-event-only chart silently disagrees with the headline
+    number it sits under.
+
+    Archive rows are dated by session start, so their day placement is coarser
+    than per-event. That is a real limitation, and it is still far better than
+    omitting half of a month.
+    """
     tok = "input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens"
-    rows = conn.execute(
+    atok = ("COALESCE(input_tokens,0)+COALESCE(output_tokens,0)"
+            "+COALESCE(cache_creation_tokens,0)+COALESCE(cache_read_tokens,0)")
+    agg: dict[str, list[int]] = {}
+    for d, m, s in conn.execute(
         f"""SELECT substr(ts,1,10) d,
                    SUM(CASE WHEN is_sidechain=0 THEN {tok} ELSE 0 END),
                    SUM(CASE WHEN is_sidechain>0 THEN {tok} ELSE 0 END)
-            FROM usage_events WHERE ts IS NOT NULL
-            GROUP BY d ORDER BY d DESC LIMIT ?""", (days,)).fetchall()
-    return [(d, m or 0, s or 0) for d, m, s in reversed(rows)]
+            FROM usage_events WHERE ts IS NOT NULL GROUP BY d"""):
+        agg[d] = [m or 0, s or 0]
+    try:
+        for d, m, s in conn.execute(
+            f"""SELECT day,
+                       SUM(CASE WHEN is_sidechain=0 THEN {atok} ELSE 0 END),
+                       SUM(CASE WHEN is_sidechain>0 THEN {atok} ELSE 0 END)
+                FROM archived_usage
+                WHERE still_on_disk=0 AND day IS NOT NULL AND length(day)=10
+                GROUP BY day"""):
+            e = agg.setdefault(d, [0, 0])
+            e[0] += m or 0
+            e[1] += s or 0
+    except Exception:
+        pass                       # archive table absent on a fresh install
+    return [(d, *agg[d]) for d in sorted(agg)[-days:]]
 
 
 def svg_chart(series: list[tuple[str, int, int]], width: int = 800,
