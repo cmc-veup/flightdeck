@@ -66,47 +66,53 @@ CREATE TABLE IF NOT EXISTS snapshots (
 # 1h cache-write = 2.0x base input; 5m = 1.25x base input -> 1h = 1.6x the 5m rate.
 CACHE_1H_FACTOR = 1.6
 
-# (pattern, in, out, cache_read, cache_write_5m, is_estimate, note)
-# Anthropic rates from platform docs 2026-07 (cache read=0.1x in, write 5m=1.25x in).
-PRICING_SEED: list[tuple[str, float, float, float, float, int, str]] = [
-    ("claude-fable-5",   10.0, 50.0, 1.00, 12.50, 0, "Anthropic list price", "", ""),
-    ("claude-mythos",    10.0, 50.0, 1.00, 12.50, 0, "same as fable-5", "", ""),
-    ("claude-opus-5",     5.0, 25.0, 0.50,  6.25, 0, "Anthropic list price", "", ""),
-    ("claude-opus-4-1",  15.0, 75.0, 1.50, 18.75, 1, "legacy opus 4.1 tier", "", ""),
-    ("claude-opus-4",     5.0, 25.0, 0.50,  6.25, 0, "opus 4.5-4.8", "", ""),
-    # Tokens must be priced at the rate in force WHEN THEY WERE SPENT. Sonnet-5's
-    # introductory rate runs through 2026-08-31, so everything so far bills at
-    # $2/$10 — using the sticker price would overcharge it by 50%.
-    ("claude-sonnet-5",   2.0, 10.0, 0.20,  2.50, 1, "intro pricing", "", "2026-08-31"),
-    ("claude-sonnet-5",   3.0, 15.0, 0.30,  3.75, 1, "sticker after intro", "2026-09-01", ""),
-    ("claude-sonnet-4",   3.0, 15.0, 0.30,  3.75, 0, "Anthropic list price", "", ""),
-    ("claude-sonnet-3",   3.0, 15.0, 0.30,  3.75, 1, "retired tier", "", ""),
-    ("claude-haiku-4",    1.0,  5.0, 0.10,  1.25, 0, "Anthropic list price", "", ""),
-    ("claude-3-5-haiku",  0.8,  4.0, 0.08,  1.00, 1, "retired tier", "", ""),
-    ("gpt-5.2",          1.75, 14.0, 0.175, 0.0,  0, "OpenAI list", "", ""),
-    ("gpt-5.4-nano",     0.20,  1.25,0.02,  0.0,  0, "OpenAI list", "2026-03-05", ""),
-    ("gpt-5.4-mini",     0.75,  4.5, 0.075, 0.0,  0, "OpenAI list", "2026-03-05", ""),
-    ("gpt-5.4",          2.50, 15.0, 0.25,  0.0,  0, "OpenAI list", "2026-03-05", ""),
-    ("gpt-5.5",          5.00, 30.0, 0.50,  0.0,  0, "OpenAI list", "2026-04-23", ""),
-    ("gpt-5.6-luna",     1.00,  6.0, 0.10,  0.0,  0, "OpenAI list", "2026-07-09", ""),
-    ("gpt-5.6-terra",    2.50, 15.0, 0.25,  0.0,  0, "OpenAI list", "2026-07-09", ""),
-    ("gpt-5.6",          5.00, 30.0, 0.50,  0.0,  0, "OpenAI list (sol)", "2026-07-09", ""),
-    ("gpt-5",            1.75, 14.0, 0.175, 0.0,  1, "fallback for unlabelled gpt-5.x", "", ""),
-    ("grok",             0.20,  0.50, 0.05, 0.0,  1, "estimate; grok db reports cost_micros directly", "", ""),
-    ("deepseek",         0.28,  1.10, 0.028, 0.0, 1, "deepseek-chat est.", "", ""),
-    # Recovered archive rows carry no model id. They are entirely Feb-Mar 2026,
-    # where claude-opus-4-6 was 88% of known Claude tokens — so the opus-4 tier
-    # is the evidence for them, not a guess. Without this row 12.19B tokens
-    # silently priced at $0 and the estate read $11k light.
-    ("claude-unknown",   5.0, 25.0, 0.50,  6.25, 1, "recovered rows w/o model; era's dominant tier (opus-4-6)", "", ""),
-    ("glm",              0.6,  2.2, 0.06,  0.0,  1, "Zhipu GLM est.", "", ""),
-    ("kimi",             0.6,  2.5, 0.06,  0.0,  1, "Moonshot Kimi est.", "", ""),
-    ("minimax",          0.3,  1.2, 0.03,  0.0,  1, "MiniMax est.", "", ""),
-    ("gemini-3-flash",   0.3,  2.5, 0.03,  0.0,  1, "Gemini flash est.", "", ""),
-    ("gemini-3.1-pro",   1.25,10.0, 0.125, 0.0,  1, "Gemini pro est.", "", ""),
-    ("qwen",             0.0,  0.0, 0.0,   0.0,  0, "local via ollama - genuinely $0", "", ""),
-    ("<synthetic>",      0.0,  0.0, 0.0,   0.0,  0, "not a model - Claude Code internal marker", "", ""),
-    ("ollama",            0.0,   0.0, 0.0,  0.0,  0, "local inference, $0", "", ""),
+# (pattern, in, out, cache_read, cache_write_5m, is_estimate, note,
+#  valid_from, valid_to)
+#
+# is_estimate=1 means THE PUBLISHED RATE WAS NOT FOUND — not 'we did not
+# get round to confirming it'. Anthropic, OpenAI, DeepSeek, Kimi and GLM-5.2
+# rates below were read off their published cards on 2026-07-30 and are
+# exact. Rows still flagged name what is missing in their note.
+#
+# Local models (ollama/qwen) carry a HOSTED-EQUIVALENT rate, not $0. The
+# unit here is projected API cost; local inference is still inference, and
+# pricing it at zero understates the estate. The cheapest credible
+# comparable is used deliberately — reaching for the dearest would be
+# gaming rather than accounting.
+PRICING_SEED: list[tuple] = [
+    ('<synthetic>', 0.0, 0.0, 0.0, 0.0, 0, "not a model - Claude Code internal marker", '', ''),
+    ('claude-3-5-haiku', 0.8, 4.0, 0.08, 1.0, 0, "Haiku 3.5 retired - Anthropic published card, verified 2026-07-30", '', ''),
+    ('claude-fable-5', 10.0, 50.0, 1.0, 12.5, 0, "Fable 5 - Anthropic published card, verified 2026-07-30", '', ''),
+    ('claude-haiku-4', 1.0, 5.0, 0.1, 1.25, 0, "Haiku 4.5 - Anthropic published card, verified 2026-07-30", '', ''),
+    ('claude-mythos', 10.0, 50.0, 1.0, 12.5, 0, "Mythos 5 - Anthropic published card, verified 2026-07-30", '', ''),
+    ('claude-opus-4', 5.0, 25.0, 0.5, 6.25, 0, "Opus 4.5-4.8 - Anthropic published card, verified 2026-07-30", '', ''),
+    ('claude-opus-4-1', 15.0, 75.0, 1.5, 18.75, 0, "Opus 4.1 deprecated - Anthropic published card, verified 2026-07-30", '', ''),
+    ('claude-opus-5', 5.0, 25.0, 0.5, 6.25, 0, "Opus 5 - Anthropic published card, verified 2026-07-30", '', ''),
+    ('claude-sonnet-3', 3.0, 15.0, 0.3, 3.75, 0, "Sonnet 3.x retired - Anthropic published card, verified 2026-07-30", '', ''),
+    ('claude-sonnet-4', 3.0, 15.0, 0.3, 3.75, 0, "Sonnet 4-4.6 - Anthropic published card, verified 2026-07-30", '', ''),
+    ('claude-sonnet-5', 2.0, 10.0, 0.2, 2.5, 0, "introductory, through 2026-08-31 - Anthropic published card, verified 2026-07-30", '', '2026-08-31'),
+    ('claude-sonnet-5', 3.0, 15.0, 0.3, 3.75, 0, "standard from 2026-09-01 - Anthropic published card, verified 2026-07-30", '2026-09-01', ''),
+    ('deepseek-v4-flash', 0.14, 0.28, 0.0028, 0.0, 0, "V4-Flash - DeepSeek published card, verified 2026-07-30", '', ''),
+    ('deepseek-v4-pro', 0.435, 0.87, 0.003625, 0.0, 0, "V4-Pro - DeepSeek published card, verified 2026-07-30", '', ''),
+    ('glm-5.2', 1.4, 4.4, 0.26, 0.0, 0, "GLM-5.2 - Z.ai published card, verified 2026-07-30", '', ''),
+    ('gpt-5.2', 1.75, 14.0, 0.175, 0.0, 0, "OpenAI list", '', ''),
+    ('gpt-5.4', 2.5, 15.0, 0.25, 0.0, 0, "OpenAI list", '2026-03-05', ''),
+    ('gpt-5.4-mini', 0.75, 4.5, 0.075, 0.0, 0, "OpenAI list", '2026-03-05', ''),
+    ('gpt-5.4-nano', 0.2, 1.25, 0.02, 0.0, 0, "OpenAI list", '2026-03-05', ''),
+    ('gpt-5.5', 5.0, 30.0, 0.5, 0.0, 0, "OpenAI list", '2026-04-23', ''),
+    ('gpt-5.6', 5.0, 30.0, 0.5, 0.0, 0, "OpenAI list (sol)", '2026-07-09', ''),
+    ('gpt-5.6-luna', 1.0, 6.0, 0.1, 0.0, 0, "OpenAI list", '2026-07-09', ''),
+    ('gpt-5.6-terra', 2.5, 15.0, 0.25, 0.0, 0, "OpenAI list", '2026-07-09', ''),
+    ('kimi', 0.6, 3.0, 0.15, 0.0, 0, "Kimi K2.5 - Moonshot published card, verified 2026-07-30. Cache-hit input quoted 0.10-0.16 across providers; 0.15 used.", '', ''),
+    ('claude-unknown', 5.0, 25.0, 0.5, 6.25, 1, "recovered rows w/o model; era's dominant tier (opus-4-6)", '', ''),
+    ('gemini-3-flash', 0.3, 2.5, 0.03, 0.0, 1, "Gemini 3 Flash card not verified 2026-07-30 - needs a source", '', ''),
+    ('gemini-3.1-pro', 1.25, 10.0, 0.125, 0.0, 1, "Gemini 3.1 Pro card not verified 2026-07-30 - needs a source", '', ''),
+    ('glm', 0.6, 2.2, 0.06, 0.0, 1, "GLM-5.1 card NOT located as of 2026-07-30. For reference GLM-5.2 is 1.40/4.40, so this is likely conservative. Replace when 5.1 is published.", '', ''),
+    ('gpt-5', 1.75, 14.0, 0.175, 0.0, 1, "fallback for unlabelled gpt-5.x only; specific gpt-5.x rows are exact", '', ''),
+    ('grok', 0.2, 0.5, 0.05, 0.0, 1, "grok reports cost_micros directly, so this row rarely applies", '', ''),
+    ('minimax', 0.3, 1.2, 0.03, 0.0, 1, "MiniMax M2.7 card not verified 2026-07-30 - needs a source", '', ''),
+    ('ollama', 0.22, 1.8, 0.022, 0.0, 1, "hosted-equivalent for locally served models; see qwen note", '', ''),
+    ('qwen', 0.22, 1.8, 0.022, 0.0, 1, "hosted-equivalent: Qwen3-Coder-480B on Alibaba Model Studio standard tier ($0.22/$1.80). Cache read assumed 10% of input - not published.", '', ''),
 ]
 
 
