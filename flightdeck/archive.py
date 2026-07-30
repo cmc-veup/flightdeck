@@ -134,9 +134,20 @@ def import_checkpoint(db_path=None, checkpoint: Path | None = None) -> dict:
              account_root, rec.get("project"), rec.get("model"),
              (rec.get("date") or "")[:10], sidechain,
              inp, out, cw, cr, rec.get("messages") or 0, on_disk,
-             # The archive priced this session when it ran. Keep that number:
-             # it beats any tier we could infer, and it is dated by construction.
-             int(round(float(rec["cost"]) * 1e6)) if rec.get("cost") is not None else None),
+             # DELIBERATELY NOT rec["cost"].
+             #
+             # The checkpoint records a cost, and it is tempting to treat it as
+             # authoritative because it was computed when the session ran. It is
+             # not: spend-tracker.py computed it from ITS OWN rate card, and that
+             # card was stale. It priced this window at Opus 4.1 rates ($15/$75,
+             # cache read $1.50) when the per-event rows prove the window was
+             # Opus 4.6 ($5/$25, cache read $0.50) — 7.59B of opus-4-6 and not a
+             # single opus-4-1 token. The recorded figure overstates by ~3x.
+             #
+             # cost_micros is for costs the PROVIDER issued (grok returns one).
+             # A number another tool derived is just someone else's arithmetic,
+             # and inherits their bugs.
+             None),
         )
         rows += 1
         total = inp + out + cw + cr
