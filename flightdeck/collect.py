@@ -79,7 +79,13 @@ def run(full: bool = False, quiet: bool = False) -> dict:
             if checkpoint.file_unchanged(ck, key, st):
                 stats["files_skipped"] += 1
                 continue
-            row, snapshot = codex_collector.parse_file(f)
+            try:
+                row, snapshot = codex_collector.parse_file(f)
+            except OSError:
+                # Unreadable this pass: leave it UNMARKED so the next collect
+                # retries. Marking it anyway (the old fail-open behavior) froze
+                # the file out of every future incremental run.
+                continue
             if row is not None:
                 codex_collector.insert_row(conn, row)
                 n_rows += 1

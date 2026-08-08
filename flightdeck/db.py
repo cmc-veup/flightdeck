@@ -133,7 +133,11 @@ def _pricing_key_ok(conn) -> bool:
 
 def open_db(path=None) -> sqlite3.Connection:
     ensure_dirs()
-    conn = sqlite3.connect(str(path or DB_PATH))
+    # timeout IS sqlite's busy_timeout. Python's 5s default was not enough:
+    # hourly collects died with "database is locked" at refresh_pricing's
+    # commit whenever a concurrent full scan held its 250-file batch
+    # transaction longer than 5s. 30s outlasts any observed batch window.
+    conn = sqlite3.connect(str(path or DB_PATH), timeout=30.0)
     conn.executescript(SCHEMA)
     # Effective-dating, added in place for databases created before it existed.
     cols = {r[1] for r in conn.execute("PRAGMA table_info(pricing)")}
