@@ -6,6 +6,16 @@ the rollout — so the LAST token_count per file is the truth (prior tools eithe
 counted characters or capped reads at 100 lines/file). One row per rollout,
 INSERT OR REPLACE so a still-growing rollout stays correct on re-scan.
 
+Identity: one rollout FILE is one run, keyed by the UUID embedded in its
+filename (rollout-<timestamp>-<uuid>.jsonl). It must NOT be keyed by the last
+session_meta seen in the stream: forked/resumed rollouts (codex exec) replay
+their parent's history INCLUDING the parent's session_meta line, so many files
+share a trailing session id. Keying on that id collapsed whole fleets of runs
+onto one (provider, session_id, event_id) row — 121 Aug-5 rollouts became 26 —
+and INSERT OR REPLACE kept only the last-scanned file's totals (~75% of codex
+burn silently dropped). The filename UUID equals the file's OWN (first)
+session_meta id and is unique per file by construction.
+
 Normalization: codex `input_tokens` INCLUDES `cached_input_tokens`; we store
 input = input - cached and cache_read = cached so the columns mean the same
 thing as Anthropic's. `reasoning_output_tokens` is a subset of output_tokens
@@ -17,8 +27,24 @@ Also captures the latest rate_limits/plan_type payload as a snapshot.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Iterator
+
+_FILENAME_UUID = re.compile(
+    r"-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+)
+
+
+def rollout_id(path: Path) -> str:
+    """Stable per-file identity: the UUID from rollout-<timestamp>-<uuid>.jsonl.
+
+    Falls back to the full stem when the name carries no UUID — still unique
+    per file, which is the invariant that matters.
+    """
+    m = _FILENAME_UUID.search(path.stem)
+    return m.group(1) if m else path.stem
 
 
 def discover_files(root: Path) -> Iterator[Path]:
@@ -28,15 +54,18 @@ def discover_files(root: Path) -> Iterator[Path]:
 
 
 def parse_file(path: Path) -> tuple[dict | None, dict | None]:
-    """Returns (usage_row | None, rate_limits_snapshot | None)."""
+    """Returns (usage_row | None, rate_limits_snapshot | None).
+
+    Raises OSError when the file cannot be opened, so the caller can leave it
+    unmarked in the checkpoint and retry next collect (fail-closed). Swallowing
+    it here meant the file got checkpointed as done and its tokens were lost to
+    every future incremental run.
+    """
     meta: dict = {}
     model: str | None = None
     last_tc: dict | None = None
     last_ts: str | None = None
-    try:
-        fh = open(path, "r", encoding="utf-8", errors="replace")
-    except OSError:
-        return None, None
+    fh = open(path, "r", encoding="utf-8", errors="replace")
     with fh:
         for line in fh:
             if not line.startswith("{"):
@@ -52,7 +81,10 @@ def parse_file(path: Path) -> tuple[dict | None, dict | None]:
             t = o.get("type")
             payload = o.get("payload") if isinstance(o.get("payload"), dict) else {}
             if t == "session_meta":
-                meta = payload
+                # FIRST wins: the file's own meta. Later session_meta lines are
+                # the PARENT session's, replayed into forked/resumed rollouts.
+                if not meta:
+                    meta = payload
             elif t == "turn_context":
                 model = payload.get("model") or model
             elif t == "event_msg" and payload.get("type") == "token_count":
@@ -68,7 +100,7 @@ def parse_file(path: Path) -> tuple[dict | None, dict | None]:
     inp = int(tu.get("input_tokens") or 0)
     cached = int(tu.get("cached_input_tokens") or 0)
     row = {
-        "session_id": meta.get("id") or path.stem,
+        "session_id": rollout_id(path),
         "event_id": "rollout-total",
         "model": model or meta.get("model_provider") or "gpt-5",
         "ts": last_ts,
