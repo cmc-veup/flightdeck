@@ -1,0 +1,30 @@
+#!/bin/bash
+# fd-stamp-exec — stamp spawn provenance, then exec the real CLI in place.
+#
+# Usage:
+#   FD_SPAWNED_BY=<orchestrator> fd-stamp-exec <cli> [args...]
+#
+# The first argument MUST be the CLI binary itself (claude, codex, gemini,
+# grok, ...). Put env assignments BEFORE fd-stamp-exec, not between it and
+# the CLI, so the provider field records the real binary name.
+#
+# What it does, in order:
+#   1. exports FD_SPAWNED_BY / FD_OPERATOR (and FD_BEAD_ID when set) so the
+#      markers land in the child environment,
+#   2. appends one manifest line via fd-spawn-stamp with pid $$ — exec keeps
+#      the pid, so the manifest pid IS the CLI's pid,
+#   3. execs the CLI, replacing this process (tmux pane process names and
+#      harness health checks that match on process name are unaffected).
+#
+# FAIL-OPEN: a stamping failure never stops the spawn.
+if [ $# -lt 1 ]; then
+  echo "usage: FD_SPAWNED_BY=<orchestrator> fd-stamp-exec <cli> [args...]" >&2
+  exit 2
+fi
+export FD_SPAWNED_BY="${FD_SPAWNED_BY:-unknown}"
+export FD_OPERATOR="${FD_OPERATOR:-$USER}"
+if [ -n "$FD_BEAD_ID" ]; then
+  export FD_BEAD_ID
+fi
+"$(cd "$(dirname "$0")" && pwd)/fd-spawn-stamp" "$FD_SPAWNED_BY" "$(basename "$1")" "$$" || true
+exec "$@"
