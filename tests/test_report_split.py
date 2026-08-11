@@ -130,11 +130,113 @@ class ReportSplitTests(unittest.TestCase):
     def test_legacy_subagent_key_stable(self):
         legacy = self.data["subagent"]
         self.assertEqual(
-            set(legacy.keys()), {"tokens", "share_of_total", "cost_usd"}
+            set(legacy.keys()),
+            {"tokens", "share_of_total", "share_of_provider", "cost_usd"},
         )
         self.assertEqual(
             legacy["tokens"], self.data["sources"]["subagent_total"]["total_tokens"]
         )
+
+    def test_window_accepts_arbitrary_hours_and_days(self):
+        self.assertEqual(report.parse_window("48h"), timedelta(hours=48))
+        self.assertEqual(report.parse_window("14d"), timedelta(days=14))
+        self.assertEqual(report.parse_window("24h"), timedelta(hours=24))
+        for bad in ("yesterday", "0h", "24", "h", "-3h", "1w"):
+            with self.assertRaises(SystemExit):
+                report.parse_window(bad)
+        # the 30h-old event is invisible at 24h and visible at 48h
+        data = report.gather(
+            since="48h",
+            now=NOW.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+            db_path=self.db_path,
+        )
+        self.assertEqual(data["totals"]["events"], 5)
+
+
+def _insert(conn, provider, session, event, ts_, inp, out, sidechain=0,
+            model="claude-fable-5"):
+    conn.execute(
+        """INSERT INTO usage_events (provider, account_root, session_id, event_id,
+               model, ts, input_tokens, output_tokens, is_sidechain)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (provider, provider, session, event, model, ts_, inp, out, sidechain),
+    )
+
+
+class PerProviderShareTests(unittest.TestCase):
+    """The subagent share's denominator is PER-PROVIDER, never all-provider.
+
+    Only providers that record a delegation dimension (any is_sidechain>0
+    row) may enter the denominator. codex writes is_sidechain=0 for every
+    row, so a codex-heavy window must leave the subagent ratio untouched —
+    the dilution regression this guards against read 3.0% instead of 4.3%
+    on 2026-08-07 and looked like a collection failure.
+    """
+
+    NOW_Z = NOW.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+    def _gather(self, with_codex: bool) -> dict:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "usage.db"
+        conn = open_db(db_path)
+        refresh_pricing(conn)
+        _insert(conn, "claude", "s1", "m1", ts(1), inp=100, out=50)
+        _insert(conn, "claude", "s1", "sa1", ts(2), inp=30, out=20, sidechain=1)
+        if with_codex:
+            _insert(conn, "codex", "c1", "r1", ts(3), inp=500, out=300,
+                    model="gpt-5.6")
+        conn.commit()
+        conn.close()
+        return report.gather(since="24h", now=self.NOW_Z, db_path=db_path)
+
+    def test_share_denominator_is_per_provider(self):
+        # claude: 200 billed tokens, 50 of them subagent -> 25% within claude,
+        # regardless of how many codex tokens share the window.
+        with_codex = self._gather(with_codex=True)
+        without = self._gather(with_codex=False)
+        self.assertEqual(
+            with_codex["sources"]["subagent_total"]["token_share"], 0.25)
+        self.assertEqual(
+            without["sources"]["subagent_total"]["token_share"], 0.25)
+        self.assertEqual(
+            with_codex["sources"]["subagent_total"]["token_share"],
+            without["sources"]["subagent_total"]["token_share"],
+            "codex tokens inflated the subagent-share denominator",
+        )
+
+    def test_all_token_share_is_separate_and_labelled(self):
+        data = self._gather(with_codex=True)
+        sub = data["sources"]["subagent_total"]
+        self.assertEqual(sub["token_share_all"], 0.05)   # 50 / 1,000
+        legacy = data["subagent"]
+        self.assertEqual(legacy["share_of_total"], 0.05)
+        self.assertEqual(legacy["share_of_provider"], 0.25)
+
+    def test_delegation_section_names_both_provider_classes(self):
+        data = self._gather(with_codex=True)
+        dele = data["delegation"]
+        self.assertEqual(dele["providers"], ["claude"])
+        self.assertEqual(dele["no_dimension_providers"], ["codex"])
+        self.assertEqual(dele["total_tokens"], 200)
+        self.assertEqual(dele["no_dimension_tokens"], 800)
+
+    def test_totals_still_span_every_provider(self):
+        data = self._gather(with_codex=True)
+        self.assertEqual(data["totals"]["total_tokens"], 1000)
+        # main + subagent + no-dimension == total, exactly
+        self.assertEqual(
+            data["sources"]["main"]["total_tokens"]
+            + data["sources"]["subagent_total"]["total_tokens"]
+            + data["delegation"]["no_dimension_tokens"],
+            data["totals"]["total_tokens"],
+        )
+
+    def test_human_render_labels_the_all_token_share(self):
+        text = report.render_human(self._gather(with_codex=True))
+        self.assertIn("within claude", text)
+        self.assertIn("no delegation dimension (codex)", text)
+        self.assertIn("of all tokens, subagent = 5.0%", text)
 
 
 if __name__ == "__main__":

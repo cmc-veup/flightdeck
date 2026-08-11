@@ -4,16 +4,60 @@ Subagents are a first-class reporting dimension, not a footnote: the estate
 runs as parallel sessions fanning out agents, so every section that carries
 cost also carries the main/subagent split. Source classes come from the
 is_sidechain column: 0 = main, 1 = plain subagent, 2 = workflow subagent.
+
+The split's shares are computed WITHIN the providers that record that
+dimension (see delegating_providers): codex and grok write is_sidechain=0
+unconditionally, so folding their tokens into the denominator dilutes the
+subagent ratio on multi-provider days and fakes a capture failure.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 from .db import event_cost_usd, load_pricing, open_db
 
+# Presets kept for compatibility; parse_window accepts any Nh / Nd.
 WINDOWS = {"24h": timedelta(hours=24), "7d": timedelta(days=7), "30d": timedelta(days=30)}
+
+_WINDOW_RE = re.compile(r"(\d+)([hd])")
+
+
+def parse_window(since: str) -> timedelta:
+    """Window spec -> timedelta. Any positive Nh or Nd (24h, 48h, 7d, 90d...).
+
+    The old whitelist {24h, 7d, 30d} made every other window die downstream
+    ("FATAL: cannot parse report output" in verify.sh), which silently pinned
+    the G9 drift gate to 24h. The recount side always accepted arbitrary
+    hours; the report side now matches it.
+    """
+    m = _WINDOW_RE.fullmatch(since.strip().lower())
+    if not m or not int(m.group(1)):
+        raise SystemExit(
+            f"--since must be a positive window like 24h, 48h, 7d, 30d (got {since!r})"
+        )
+    n = int(m.group(1))
+    return timedelta(hours=n) if m.group(2) == "h" else timedelta(days=n)
+
+
+def delegating_providers(conn) -> set[str]:
+    """Providers that record a delegation (is_sidechain) dimension.
+
+    Detected from the data, whole-DB: a provider that has ever written a
+    sidechain row records the dimension (claude, and deepseek when driven
+    through a Claude Code shell). codex and grok never do — their rows are
+    all is_sidechain=0 by construction, which says "unknown", not "no
+    subagents ran". Any ratio that puts their tokens in the subagent-share
+    denominator is diluted by exactly that ambiguity.
+    """
+    return {
+        p
+        for (p,) in conn.execute(
+            "SELECT DISTINCT provider FROM usage_events WHERE is_sidechain > 0"
+        )
+    }
 
 TOKEN_COLS = [
     "input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens",
@@ -28,14 +72,13 @@ def iso_z(dt: datetime) -> str:
 
 
 def window_bounds(since: str, now: str | None):
-    if since not in WINDOWS:
-        raise SystemExit(f"--since must be one of {sorted(WINDOWS)}")
+    delta = parse_window(since)
     end = (
         datetime.fromisoformat(now.replace("Z", "+00:00"))
         if now
         else datetime.now(timezone.utc)
     )
-    start = end - WINDOWS[since]
+    start = end - delta
     return iso_z(start), iso_z(end)
 
 
@@ -59,12 +102,24 @@ def _billed_tokens(v: dict) -> int:
     return sum(v[c] for c in TOKEN_COLS[:4])
 
 
-def _with_share(v: dict, total_tokens: int, total_cost: float) -> dict:
+def _with_share(v: dict, deleg_tokens: int, deleg_cost: float,
+                all_tokens: int, all_cost: float) -> dict:
+    """token_share / cost_share are WITHIN the delegating providers.
+
+    Only providers that record a delegation dimension can appear in a
+    main/subagent split, so those providers' totals are the only honest
+    denominator — an all-provider denominator lets a codex-heavy day crush
+    the ratio (2026-08-07: 3.0% of all tokens vs 4.3% of claude tokens) and
+    read as a capture failure. The all-token figures stay available under
+    the explicitly named *_all keys.
+    """
     toks = _billed_tokens(v)
     return v | {
         "total_tokens": toks,
-        "token_share": round(toks / total_tokens, 4) if total_tokens else 0.0,
-        "cost_share": round(v["cost_usd"] / total_cost, 4) if total_cost else 0.0,
+        "token_share": round(toks / deleg_tokens, 4) if deleg_tokens else 0.0,
+        "cost_share": round(v["cost_usd"] / deleg_cost, 4) if deleg_cost else 0.0,
+        "token_share_all": round(toks / all_tokens, 4) if all_tokens else 0.0,
+        "cost_share_all": round(v["cost_usd"] / all_cost, 4) if all_cost else 0.0,
     }
 
 
@@ -72,6 +127,9 @@ def gather(since: str = "24h", now: str | None = None, db_path=None) -> dict:
     start, end = window_bounds(since, now)
     conn = open_db(db_path)
     pricing = load_pricing(conn)
+    # Whole-DB, not windowed: a window in which claude happened to run no
+    # subagents still gets a claude-sized denominator, not an empty one.
+    delegating = delegating_providers(conn)
     cur = conn.execute(
         f"""
         SELECT provider, account_root, model, is_sidechain,
@@ -91,6 +149,9 @@ def gather(since: str = "24h", now: str | None = None, db_path=None) -> dict:
     spend_architecture: dict[str, dict] = {}
     by_model_source: dict[str, dict] = {}
     total = _zero()
+    deleg_total = _zero()          # rows from providers WITH a delegation dimension
+    no_dim = _zero()               # rows from providers without one (codex, grok)
+    no_dim_providers: set[str] = set()
 
     for r in cur:
         provider, account, model, side = r[0], r[1], r[2] or "?", r[3]
@@ -109,13 +170,21 @@ def gather(since: str = "24h", now: str | None = None, db_path=None) -> dict:
         _add(by_provider.setdefault(provider, _zero()), row, cost, est)
         _add(by_model.setdefault(model, _zero()), row, cost, est)
         _add(by_account.setdefault(f"{provider}/{account}", _zero()), row, cost, est)
-        _add(by_source[source], row, cost, est)
+        # The main/subagent split only exists where the dimension is recorded.
+        # A dimensionless provider's rows are NOT "main" — they are unknown —
+        # so they accumulate separately instead of inflating the denominator.
+        if not delegating or provider in delegating:
+            _add(by_source[source], row, cost, est)
+            _add(deleg_total, row, cost, est)
+        else:
+            _add(no_dim, row, cost, est)
+            no_dim_providers.add(provider)
         _add(spend_architecture.setdefault(f"{provider}/{source}", _zero()), row, cost, est)
         _add(by_model_source.setdefault(f"{model}/{source}", _zero()), row, cost, est)
         _add(total, row, cost, est)
     conn.close()
 
-    hours = WINDOWS[since].total_seconds() / 3600
+    hours = parse_window(since).total_seconds() / 3600
     total_tokens = _billed_tokens(total)
     total_cost = total["cost_usd"]
     grand = {
@@ -128,17 +197,31 @@ def gather(since: str = "24h", now: str | None = None, db_path=None) -> dict:
     sub_all = _zero()
     _merge(sub_all, by_source["subagent"])
     _merge(sub_all, by_source["workflow-subagent"])
+    deleg_tokens = _billed_tokens(deleg_total)
+    deleg_cost = deleg_total["cost_usd"]
+    shares = (deleg_tokens, deleg_cost, total_tokens, total_cost)
     sources = {
-        "main": _with_share(by_source["main"], total_tokens, total_cost),
-        "subagent_total": _with_share(sub_all, total_tokens, total_cost),
-        "subagent_plain": _with_share(by_source["subagent"], total_tokens, total_cost),
-        "workflow_subagent": _with_share(by_source["workflow-subagent"], total_tokens, total_cost),
+        "main": _with_share(by_source["main"], *shares),
+        "subagent_total": _with_share(sub_all, *shares),
+        "subagent_plain": _with_share(by_source["subagent"], *shares),
+        "workflow_subagent": _with_share(by_source["workflow-subagent"], *shares),
     }
 
     return {
         "window": {"since": since, "start": start, "end": end},
         "totals": grand,
         "sources": sources,
+        "delegation": {
+            "providers": sorted(delegating),
+            "total_tokens": deleg_tokens,
+            "cost_usd": round(deleg_cost, 4),
+            "no_dimension_providers": sorted(no_dim_providers),
+            "no_dimension_tokens": _billed_tokens(no_dim),
+            "no_dimension_cost_usd": round(no_dim["cost_usd"], 4),
+            "note": "main/subagent shares are computed within `providers` only; "
+                    "`no_dimension_providers` record no is_sidechain data, so "
+                    "their tokens never enter the split's denominator",
+        },
         "spend_architecture": spend_architecture,
         "by_model_source": by_model_source,
         "by_provider": by_provider,
@@ -152,10 +235,13 @@ def gather(since: str = "24h", now: str | None = None, db_path=None) -> dict:
             "cache_5m_tokens": total["cache_5m_tokens"],
             "cache_1h_tokens": total["cache_1h_tokens"],
         },
-        # legacy key, kept for compatibility with early consumers
+        # legacy key, kept for compatibility with early consumers.
+        # share_of_total keeps its historical meaning (of ALL tokens, every
+        # provider); share_of_provider is the honest within-provider figure.
         "subagent": {
             "tokens": sources["subagent_total"]["total_tokens"],
-            "share_of_total": sources["subagent_total"]["token_share"],
+            "share_of_total": sources["subagent_total"]["token_share_all"],
+            "share_of_provider": sources["subagent_total"]["token_share"],
             "cost_usd": round(sources["subagent_total"]["cost_usd"], 4),
         },
     }
@@ -205,8 +291,11 @@ def render_human(data: dict) -> str:
     )
 
     s = data["sources"]
+    dele = data["delegation"]
     out.append("")
-    out.append("  main vs subagent:")
+    provs = ", ".join(dele["providers"]) or "all providers"
+    out.append(f"  main vs subagent (within {provs} — the providers recording a"
+               " delegation dimension):")
     for label, key in (("main", "main"), ("subagent", "subagent_total")):
         v = s[key]
         out.append(
@@ -217,6 +306,12 @@ def render_human(data: dict) -> str:
         f"    {'':<11}subagent = plain {_fmt(s['subagent_plain']['total_tokens'])}"
         f" + workflow {_fmt(s['workflow_subagent']['total_tokens'])} tok"
     )
+    if dele["no_dimension_tokens"]:
+        out.append(
+            f"    no delegation dimension ({', '.join(dele['no_dimension_providers'])}):"
+            f" {_fmt(dele['no_dimension_tokens'])} tok excluded from the split"
+            f" — of all tokens, subagent = {s['subagent_total']['token_share_all']:.1%}"
+        )
 
     _section_table(out, "spend architecture (provider x source)", data["spend_architecture"])
     _section_table(out, "model x source", data["by_model_source"])

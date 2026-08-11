@@ -38,14 +38,14 @@ pip install -e .        # or run in place: python3 -m flightdeck ...
 flightdeck collect            # incremental scan into ~/.flightdeck/usage.db
 flightdeck collect --full     # ignore the checkpoint, re-scan everything
 flightdeck report             # human table, last 24h
-flightdeck report --since 7d --json
+flightdeck report --since 7d --json   # --since takes any Nh or Nd window (48h, 90d, ...)
 flightdeck doctor             # which sources exist, freshness, row counts
 flightdeck export --viberank  # ccusage-shaped leaderboard payload (never auto-submits)
 ```
 
 `collect` is incremental: a per-file mtime+size checkpoint in `~/.flightdeck/checkpoint.json` means a 5.7 GB corpus is scanned once, and each later run touches only files that changed. Re-parsing is idempotent; the unique event key makes duplicate inserts a no-op.
 
-`report` leads with the main-vs-subagent split (tokens and cost, with each side's share), then breaks the window down three ways: a spend-architecture table (provider by source, with workflow subagents separated from plain ones), model by source, and account root. Cache read/write totals include the 5m/1h TTL breakdown; burn is reported as dollars per day and tokens per hour. `--json` emits the same data for scripts; the `sources`, `spend_architecture`, and `by_model_source` keys are additive and stable.
+`report` leads with the main-vs-subagent split (tokens and cost, with each side's share). The split's shares are computed within the providers that record a delegation dimension — codex and grok write `is_sidechain=0` unconditionally, so their tokens are reported alongside the split (and in every total) but never inside its denominator, where a codex-heavy day would dilute the subagent ratio into a phantom capture failure. It then breaks the window down three ways: a spend-architecture table (provider by source, with workflow subagents separated from plain ones), model by source, and account root. Cache read/write totals include the 5m/1h TTL breakdown; burn is reported as dollars per day and tokens per hour. `--json` emits the same data for scripts; the `sources`, `spend_architecture`, and `by_model_source` keys are additive and stable.
 
 ## Leaderboards
 
