@@ -120,6 +120,33 @@ Pricing lives in a `pricing` table with per-Mtoken input, output, cache-read, an
 
 Rates are **effective-dated**: rows carry `valid_from` / `valid_to`, and a token is priced at the rate in force on the day it was spent, not today's rate. Anthropic list prices were verified against 17 archived snapshots of the pricing page spanning 2026-02-01 to 2026-07-28 — no Claude per-token price moved in that window, so the Opus family prices flat throughout. Sonnet 5 is the live case: its introductory $2/$10 runs through 2026-08-31, and the $3/$15 sticker applies from 2026-09-01.
 
+## Delegation provenance (spawn stamps)
+
+Codex, Gemini, Grok and friends have no native equivalent of Claude Code's
+sidechain flag, so a fleet-spawned session is indistinguishable from an
+attended one after the fact. Flightdeck closes that gap at the **spawn side**:
+orchestrators stamp every session they launch, and the stamp is provider-
+agnostic by construction — the orchestrator writes it, the vendor is never
+consulted.
+
+- `bin/fd-spawn-stamp` appends one JSONL line to
+  `~/.flightdeck/spawn-manifest/YYYY-MM.jsonl`:
+  `{ts, orchestrator, provider, session_hint: {cwd, tmux_pane, tmux_session,
+  pid}, bead_id, operator}`. Fail-open: a stamping failure never breaks a
+  spawn.
+- `bin/fd-stamp-exec` is the wrapper form for harness command templates:
+  `FD_SPAWNED_BY=ntm fd-stamp-exec claude …` exports the `FD_*` markers into
+  the child env, stamps with the pid the CLI will inherit, then `exec`s the
+  CLI in place.
+- `python3 -m flightdeck.delegation run` ingests manifests into a
+  `spawn_stamps` table and joins them to sessions **mechanically** — provider
+  + cwd + a fixed start-time window, recorded fields only, no inference. A
+  session with no matching stamp stays **unclassified (attended-by-default)**;
+  Claude sidechains keep their native `is_sidechain` attribution.
+
+A stamp with a `bead_id` doubles as tokens-per-bead cost attribution: the
+join lands the bead id one SQL hop from every priced event in the session.
+
 ## Verifying the numbers
 
 `scripts/verify_recount.py` is an independent recount: it re-sums the raw JSONL for a time window without importing the collector, deduping the same way. Run both against a pinned window end and the totals must match exactly:

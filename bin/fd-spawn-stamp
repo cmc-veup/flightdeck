@@ -1,0 +1,48 @@
+#!/bin/bash
+# fd-spawn-stamp — append one spawn-provenance line to the flightdeck spawn manifest.
+#
+# MECHANICAL BY CONSTRUCTION: records exactly what it is told plus what the
+# environment already knows (cwd, tmux pane, pid). No classification, no
+# inference, no vendor consultation — the orchestrator writes the manifest.
+#
+# Usage:
+#   fd-spawn-stamp <orchestrator> <provider> [pid]
+#     orchestrator  who is spawning: ntm | launchd:flywheel-maintain | hit-squad | ...
+#     provider      the CLI being spawned: claude | codex | gemini | grok | ...
+#     pid           pid that will become the CLI process (default: caller's pid)
+#
+# Environment respected (all optional):
+#   FD_SPAWNED_BY    fallback orchestrator when $1 is absent
+#   FD_BEAD_ID       bead driving this spawn (also honors BEAD_ID)
+#   FD_OPERATOR      human operator (default: $USER)
+#   FD_MANIFEST_DIR  override manifest home (default ~/.flightdeck/spawn-manifest)
+#
+# Output: one JSONL line appended to <manifest-dir>/YYYY-MM.jsonl (UTC month):
+#   {ts, orchestrator, provider, session_hint:{cwd, tmux_pane, tmux_session, pid},
+#    bead_id, operator}
+#
+# FAIL-OPEN: stamping must never break a spawn. Every failure path exits 0.
+{
+  orch="${1:-${FD_SPAWNED_BY:-unknown}}"
+  prov="${2:-unknown}"
+  pid="${3:-$PPID}"
+  dir="${FD_MANIFEST_DIR:-$HOME/.flightdeck/spawn-manifest}"
+  mkdir -p "$dir" 2>/dev/null || exit 0
+  month=$(date -u +%Y-%m)
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  cwd="$PWD"
+  bead="${FD_BEAD_ID:-${BEAD_ID:-}}"
+  op="${FD_OPERATOR:-$USER}"
+  tpane="${TMUX_PANE:-}"
+  tsess=""
+  if [ -n "$TMUX" ]; then
+    tsess=$(tmux display-message -p '#S:#W' 2>/dev/null)
+  fi
+  esc() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
+  case "$pid" in ''|*[!0-9]*) pid=0 ;; esac
+  printf '{"ts":"%s","orchestrator":"%s","provider":"%s","session_hint":{"cwd":"%s","tmux_pane":"%s","tmux_session":"%s","pid":%s},"bead_id":"%s","operator":"%s"}\n' \
+    "$ts" "$(esc "$orch")" "$(esc "$prov")" "$(esc "$cwd")" "$(esc "$tpane")" \
+    "$(esc "$tsess")" "$pid" "$(esc "$bead")" "$(esc "$op")" \
+    >> "$dir/$month.jsonl"
+} 2>/dev/null
+exit 0
