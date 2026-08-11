@@ -26,7 +26,10 @@ def main(argv: list[str] | None = None) -> int:
         "report",
         help="windowed usage totals with the main/subagent spend-architecture split",
     )
-    pr.add_argument("--since", default="24h", choices=["24h", "7d", "30d"])
+    pr.add_argument(
+        "--since", default="24h", metavar="WINDOW",
+        help="window as Nh or Nd — 24h, 48h, 7d, 30d, any positive N",
+    )
     pr.add_argument("--json", action="store_true", help="robot JSON output")
     pr.add_argument("--now", default=None, help=argparse.SUPPRESS)  # fixed window end (ISO Z), for verification
 
@@ -121,7 +124,8 @@ def main(argv: list[str] | None = None) -> int:
                        rank_total=args.rank_total)
         m = r["metrics"]
         print(f"wrote {len(r['written'])} files to {args.out}")
-        print(f"  tokens {m['tokens']:,} | subagent {m['subagent_pct']:.0f}%"
+        prov = "+".join(m.get("delegating_providers") or []) or "all"
+        print(f"  tokens {m['tokens']:,} | subagent {m['subagent_pct']:.0f}% of {prov}"
               f" | cache {m['cache_pct']:.0f}% | {m['models']} models / {m['vendors']} labs")
         print(f"  swarm  {m['peak_sessions']} sustained concurrent sessions on {m['peak_day']}")
         print(f"  chart  {r['days_charted']} days -> {args.out}/usage.svg")

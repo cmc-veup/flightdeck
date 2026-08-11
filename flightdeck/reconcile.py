@@ -69,6 +69,19 @@ def totals(conn) -> dict:
             FROM usage_events"""
     ).fetchone()
 
+    # The subagent RATIO is only honest within the providers that record a
+    # delegation dimension (codex/grok write is_sidechain=0 unconditionally,
+    # which is "unknown", not "no fan-out"). per_event_main/subagent stay
+    # all-provider — callers use their sum as the measured-token base.
+    from .report import delegating_providers
+    deleg = sorted(delegating_providers(conn))
+    dwhere = f" WHERE provider IN ({','.join('?' * len(deleg))})" if deleg else ""
+    dsub = conn.execute(
+        f"""SELECT COALESCE(SUM(CASE WHEN is_sidechain>0 THEN {tok} ELSE 0 END),0),
+                   COALESCE(SUM(CASE WHEN is_sidechain=0 THEN {tok} ELSE 0 END),0)
+            FROM usage_events{dwhere}""", deleg
+    ).fetchone()
+
     return {
         "total": only_pe + only_ar + overlap,
         "per_event_only": only_pe,
@@ -79,6 +92,8 @@ def totals(conn) -> dict:
         "uncached_input": breakdown[0], "output": breakdown[1],
         "cache_write": breakdown[2], "cache_read": breakdown[3],
         "per_event_subagent": sub[0], "per_event_main": sub[1],
+        "delegating_providers": deleg,
+        "deleg_subagent": dsub[0], "deleg_main": dsub[1],
     }
 
 
@@ -87,6 +102,9 @@ def render(t: dict) -> str:
     cache = t["cache_read"] + t["cache_write"]
     measured = t["per_event_main"] + t["per_event_subagent"]
     pct = (100.0 * t["per_event_subagent"] / measured) if measured else 0
+    dmeasured = t.get("deleg_main", 0) + t.get("deleg_subagent", 0)
+    dpct = (100.0 * t.get("deleg_subagent", 0) / dmeasured) if dmeasured else 0
+    provs = ", ".join(t.get("delegating_providers") or []) or "n/a"
     return "\n".join([
         f"  ESTATE TOTAL: {total:,} tokens",
         "",
@@ -103,5 +121,7 @@ def render(t: dict) -> str:
         f"    -> cache is {100.0*cache/measured:.1f}% of measured tokens" if measured else "",
         "",
         f"    main sessions           : {t['per_event_main']:>16,}",
-        f"    subagents (real burn)   : {t['per_event_subagent']:>16,}  ({pct:.1f}%)",
+        f"    subagents (real burn)   : {t['per_event_subagent']:>16,}"
+        f"  ({dpct:.1f}% within {provs} — the providers with a delegation"
+        f" dimension; {pct:.1f}% of all tokens)",
     ])

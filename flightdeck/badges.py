@@ -31,6 +31,7 @@ from pathlib import Path
 from .db import open_db
 from .db import load_pricing, match_price
 from .reconcile import totals as estate_totals
+from .report import delegating_providers
 
 SHIELD_COLOR = "2b2b2b"          # matches the flat-square dark convention
 SUSTAINED_EVENTS = 5             # legacy: peak_concurrency() only
@@ -226,10 +227,21 @@ def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
         n = 0 if sd["fragmented"] else sd["agents"]
         if n > wave_ceiling:
             wave_ceiling = n
+    # Subagent share is a WITHIN-PROVIDER ratio. Only providers that record a
+    # delegation dimension enter the denominator: codex writes is_sidechain=0
+    # unconditionally, so a codex-heavy day charged against an all-provider
+    # denominator reads as a subagent collapse (2026-08-07: 3.0% of all
+    # tokens vs 4.3% of claude tokens) when capture is in fact intact.
+    deleg = sorted(delegating_providers(conn))
+    dfilter, dparams = "", []
+    if deleg:
+        dfilter = f" AND provider IN ({','.join('?' * len(deleg))})"
+        dparams = list(deleg)
     win = conn.execute(
         f"""SELECT COALESCE(SUM(CASE WHEN is_sidechain>0 THEN {tok} ELSE 0 END),0),
                    COALESCE(SUM({tok}),0)
-            FROM usage_events WHERE ts >= ?""", (since,)).fetchone()
+            FROM usage_events WHERE ts >= ?{dfilter}""",
+        [since] + dparams).fetchone()
     recent_sub_pct = (100.0 * win[0] / win[1]) if win[1] else 0.0
     # All-time subagent share reports DELETION DAMAGE, not fan-out. Months whose
     # subagent transcripts were deleted before indexing read 0-24%; intact ones
@@ -237,11 +249,14 @@ def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
     # compute the share over capture-complete months only, archive included.
     atok = ("COALESCE(input_tokens,0)+COALESCE(output_tokens,0)"
             "+COALESCE(cache_creation_tokens,0)+COALESCE(cache_read_tokens,0)")
+    # Same within-provider rule month by month: a codex-heavy month must not
+    # read as damage. The archive query below needs no filter — archived_usage
+    # holds only claude transcripts, a delegating provider.
     per_month: dict[str, list[int]] = {}
     for mo, t, s in conn.execute(
             f"""SELECT substr(ts,1,7), SUM({tok}),
                        SUM(CASE WHEN is_sidechain>0 THEN {tok} ELSE 0 END)
-                  FROM usage_events GROUP BY 1"""):
+                  FROM usage_events WHERE 1=1{dfilter} GROUP BY 1""", dparams):
         per_month.setdefault(mo, [0, 0])
         per_month[mo][0] += t or 0
         per_month[mo][1] += s or 0
@@ -270,6 +285,14 @@ def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
         else:
             damaged_months += 1
     subagent_pct_intact = (100.0 * isub / it) if it else 0.0
+
+    # All-time share, same denominator rule (estate_totals spans every
+    # provider, so its main/subagent components cannot be used here).
+    at = conn.execute(
+        f"""SELECT COALESCE(SUM(CASE WHEN is_sidechain>0 THEN {tok} ELSE 0 END),0),
+                   COALESCE(SUM({tok}),0)
+            FROM usage_events WHERE 1=1{dfilter}""", dparams).fetchone()
+    subagent_pct_alltime = (100.0 * at[0] / at[1]) if at[1] else 0.0
 
     # ACTIVE days, not calendar days — 48 days in the span have no rows at all.
     # Callers must say "active", and must alert if this figure ever FALLS:
@@ -313,9 +336,11 @@ def collect_metrics(conn, rank: int | None = None, tier: str | None = None,
         "days_covered": days_active,          # legacy alias
         "span_start": span[0], "span_end": span[1],
         "subagent_pct": recent_sub_pct,
-        "subagent_pct_alltime": (100.0 * est["per_event_subagent"] / measured) if measured else 0,
+        "subagent_pct_alltime": subagent_pct_alltime,
         # The defensible all-time figure: damaged months excluded, archive in.
         "subagent_pct_intact": subagent_pct_intact,
+        # Every subagent_pct above is a share of THESE providers' tokens only.
+        "delegating_providers": deleg,
         "intact_months": intact_months,
         "damaged_months": damaged_months,
         # Reads only. Cache WRITES are not "served from" cache and cost a
@@ -365,8 +390,14 @@ def build(conn, rank: int | None = None, tier: str | None = None,
     return out
 
 
-def daily_series(conn, days: int = 30) -> list[tuple[str, int, int]]:
-    """[(day, main_tokens, subagent_tokens)] for the last `days` active days.
+def daily_series(conn, days: int = 30) -> list[tuple[str, int, int, int]]:
+    """[(day, main, subagent, other)] for the last `days` active days.
+
+    `main` and `subagent` cover the providers that record a delegation
+    dimension; `other` is everything else (codex, grok — is_sidechain=0
+    unconditionally). Keeping the dimensionless providers as their own
+    column is what stops a codex-heavy day from visually crushing the
+    subagent share: their tokens never enter the main-vs-subagent split.
 
     Includes recovered archive rows, not just per-event. Reading usage_events
     alone undercounts Feb-Jun by 47-70%, because those months' transcripts were
@@ -376,18 +407,23 @@ def daily_series(conn, days: int = 30) -> list[tuple[str, int, int]]:
 
     Archive rows are dated by session start, so their day placement is coarser
     than per-event. That is a real limitation, and it is still far better than
-    omitting half of a month.
+    omitting half of a month. (No provider filter needed there: the archive
+    holds only claude transcripts, a delegating provider.)
     """
     tok = "input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens"
     atok = ("COALESCE(input_tokens,0)+COALESCE(output_tokens,0)"
             "+COALESCE(cache_creation_tokens,0)+COALESCE(cache_read_tokens,0)")
+    deleg = sorted(delegating_providers(conn))
+    in_deleg = (f"provider IN ({','.join('?' * len(deleg))})" if deleg else "1=1")
     agg: dict[str, list[int]] = {}
-    for d, m, s in conn.execute(
+    for d, m, s, o in conn.execute(
         f"""SELECT substr(ts,1,10) d,
-                   SUM(CASE WHEN is_sidechain=0 THEN {tok} ELSE 0 END),
-                   SUM(CASE WHEN is_sidechain>0 THEN {tok} ELSE 0 END)
-            FROM usage_events WHERE ts IS NOT NULL GROUP BY d"""):
-        agg[d] = [m or 0, s or 0]
+                   SUM(CASE WHEN {in_deleg} AND is_sidechain=0 THEN {tok} ELSE 0 END),
+                   SUM(CASE WHEN {in_deleg} AND is_sidechain>0 THEN {tok} ELSE 0 END),
+                   SUM(CASE WHEN NOT ({in_deleg}) THEN {tok} ELSE 0 END)
+            FROM usage_events WHERE ts IS NOT NULL GROUP BY d""",
+        list(deleg) * 3):
+        agg[d] = [m or 0, s or 0, o or 0]
     try:
         for d, m, s in conn.execute(
             f"""SELECT day,
@@ -396,7 +432,7 @@ def daily_series(conn, days: int = 30) -> list[tuple[str, int, int]]:
                 FROM archived_usage
                 WHERE still_on_disk=0 AND day IS NOT NULL AND length(day)=10
                 GROUP BY day"""):
-            e = agg.setdefault(d, [0, 0])
+            e = agg.setdefault(d, [0, 0, 0])
             e[0] += m or 0
             e[1] += s or 0
     except Exception:
@@ -404,20 +440,29 @@ def daily_series(conn, days: int = 30) -> list[tuple[str, int, int]]:
     return [(d, *agg[d]) for d in sorted(agg)[-days:]]
 
 
-def svg_chart(series: list[tuple[str, int, int]], width: int = 800,
+def svg_chart(series: list[tuple[str, int, int, int]], width: int = 800,
               height: int = 200) -> str:
-    """Stacked daily-token bars: main below, subagent above.
+    """Stacked daily-token bars: main below, subagent above, then providers
+    with no delegation dimension (codex, grok) as their own hue on top.
+
+    The third segment is load-bearing honesty: fold those tokens into "main"
+    and a codex-heavy day visually crushes the subagent share into looking
+    like a collection failure. Their tokens are real spend, so they stay on
+    the chart — as their own series, never inside the split.
 
     Hand-rolled SVG rather than a plotting dependency — this has to render
     inside a GitHub README, where only static SVG survives.
     """
     if not series:
         return "<svg xmlns='http://www.w3.org/2000/svg'/>"
+    # tolerate legacy 3-tuples: no dimensionless-provider tokens
+    series = [(r[0], r[1], r[2], r[3] if len(r) > 3 else 0) for r in series]
     pad_l, pad_b, pad_t = 52, 26, 16
     plot_w, plot_h = width - pad_l - 12, height - pad_b - pad_t
-    peak = max((m + s) for _, m, s in series) or 1
+    peak = max((m + s + o) for _, m, s, o in series) or 1
     bar = plot_w / len(series)
     gap = min(2.0, bar * 0.18)
+    has_other = any(o for *_, o in series)
 
     def y(v: float) -> float:
         return pad_t + plot_h - (v / peak) * plot_h
@@ -425,9 +470,10 @@ def svg_chart(series: list[tuple[str, int, int]], width: int = 800,
     parts = [
         f"<svg xmlns='http://www.w3.org/2000/svg' width='{width}' height='{height}' "
         f"viewBox='0 0 {width} {height}' role='img' "
-        f"aria-label='Daily token usage, main sessions and subagents'>",
+        f"aria-label='Daily token usage: main sessions, subagents, and providers "
+        f"without a delegation dimension'>",
         "<style>text{font:11px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;"
-        "fill:#8b949e}.m{fill:#2f81f7}.s{fill:#d29922}</style>",
+        "fill:#8b949e}.m{fill:#2f81f7}.s{fill:#d29922}.o{fill:#8957e5}</style>",
         f"<rect width='{width}' height='{height}' fill='#0d1117' rx='6'/>",
     ]
     for frac in (0.5, 1.0):
@@ -436,24 +482,35 @@ def svg_chart(series: list[tuple[str, int, int]], width: int = 800,
                      f"stroke='#21262d' stroke-width='1'/>")
         parts.append(f"<text x='{pad_l-6}' y='{gy+3:.1f}' text-anchor='end'>"
                      f"{_human(peak*frac)}</text>")
-    for i, (day, main, subs) in enumerate(series):
+    for i, (day, main, subs, other) in enumerate(series):
         x = pad_l + i * bar
         w = max(bar - gap, 1)
         h_main = (main / peak) * plot_h
         h_sub = (subs / peak) * plot_h
+        h_other = (other / peak) * plot_h
         parts.append(f"<rect class='m' x='{x:.1f}' y='{y(main):.1f}' width='{w:.1f}' "
                      f"height='{h_main:.1f}'><title>{day}: {_human(main)} main</title></rect>")
         if subs:
             parts.append(f"<rect class='s' x='{x:.1f}' y='{y(main+subs):.1f}' width='{w:.1f}' "
                          f"height='{h_sub:.1f}'><title>{day}: {_human(subs)} subagent"
                          f"</title></rect>")
+        if other:
+            parts.append(f"<rect class='o' x='{x:.1f}' y='{y(main+subs+other):.1f}' "
+                         f"width='{w:.1f}' height='{h_other:.1f}'>"
+                         f"<title>{day}: {_human(other)} other providers "
+                         f"(no delegation dimension)</title></rect>")
     first, last = series[0][0], series[-1][0]
     parts.append(f"<text x='{pad_l}' y='{height-6}'>{first}</text>")
     parts.append(f"<text x='{width-14}' y='{height-6}' text-anchor='end'>{last}</text>")
-    parts.append(f"<rect class='m' x='{pad_l+120}' y='{height-14}' width='9' height='9'/>"
-                 f"<text x='{pad_l+133}' y='{height-6}'>main</text>"
-                 f"<rect class='s' x='{pad_l+180}' y='{height-14}' width='9' height='9'/>"
-                 f"<text x='{pad_l+193}' y='{height-6}'>subagent</text>")
+    legend = (f"<rect class='m' x='{pad_l+90}' y='{height-14}' width='9' height='9'/>"
+              f"<text x='{pad_l+103}' y='{height-6}'>main</text>"
+              f"<rect class='s' x='{pad_l+150}' y='{height-14}' width='9' height='9'/>"
+              f"<text x='{pad_l+163}' y='{height-6}'>subagent</text>")
+    if has_other:
+        legend += (f"<rect class='o' x='{pad_l+235}' y='{height-14}' width='9' height='9'/>"
+                   f"<text x='{pad_l+248}' y='{height-6}'>other providers "
+                   f"(no delegation dimension)</text>")
+    parts.append(legend)
     parts.append("</svg>")
     return "".join(parts)
 
