@@ -21,6 +21,17 @@ input = input - cached and cache_read = cached so the columns mean the same
 thing as Anthropic's. `reasoning_output_tokens` is a subset of output_tokens
 and is kept in its own informational column.
 
+Images are COUNTED, never priced. `total_token_usage` tracks the AGENT model
+only: measured on a controlled single-image probe, the counter grew +23,602,
++25,196, +31,979, +34,513 input across four turns with the generation sitting
+between the third and fourth — flat, no spike attributable to the image. The
+`image_generation_end` event carries only call_id/result/saved_path, and
+gpt-image-2's own tokens are billed by OpenAI with no local record anywhere.
+So the agent side of an image (~135K input for one image) IS captured as
+normal rollout tokens, and the image model's side is unmeasurable from disk —
+the same class of hole as Gemini. Recording the count keeps that hole VISIBLE
+instead of silently absent; inventing a token estimate for it would not.
+
 Also captures the latest rate_limits/plan_type payload as a snapshot.
 """
 
@@ -66,11 +77,15 @@ def parse_file(path: Path) -> tuple[dict | None, dict | None]:
     last_tc: dict | None = None
     last_ts: str | None = None
     service_tier: str | None = None
+    images = 0
     fh = open(path, "r", encoding="utf-8", errors="replace")
     with fh:
         for line in fh:
             if not line.startswith("{"):
                 continue
+            if '"image_generation_end"' in line:
+                images += 1          # counted from the raw line: cheap, and the
+                                     # event carries nothing else worth parsing
             fast = ('"session_meta"' in line or '"turn_context"' in line
                     or '"token_count"' in line or '"thread_settings"' in line)
             if not fast:
@@ -126,6 +141,7 @@ def parse_file(path: Path) -> tuple[dict | None, dict | None]:
         "cwd": meta.get("cwd"),
         "cost_micros": None,
         "service_tier": service_tier,
+        "images": images,
     }
     snapshot = None
     rl = last_tc.get("rate_limits")
@@ -139,7 +155,7 @@ REPLACE_SQL = (
     "INSERT OR REPLACE INTO usage_events (provider, account_root, session_id, event_id,"
     " model, ts, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,"
     " cache_5m_tokens, cache_1h_tokens, reasoning_tokens, is_sidechain, agent_id, cwd,"
-    " cost_micros, service_tier) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    " cost_micros, service_tier, images) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 )
 
 
@@ -152,7 +168,7 @@ def insert_row(conn, row: dict) -> None:
             row["cache_creation_tokens"], row["cache_read_tokens"],
             row["cache_5m_tokens"], row["cache_1h_tokens"], row["reasoning_tokens"],
             row["is_sidechain"], row["agent_id"], row["cwd"], row["cost_micros"],
-            row.get("service_tier"),
+            row.get("service_tier"), row.get("images", 0),
         ),
     )
 
