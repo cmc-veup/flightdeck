@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
     cwd           TEXT,
     cost_micros   INTEGER,                -- provider-reported cost (grok); NULL = compute from pricing
     service_tier  TEXT,                   -- codex thread_settings.service_tier; NULL = standard
+    images        INTEGER NOT NULL DEFAULT 0,  -- gpt-image-* generations; COUNT only, see note
     PRIMARY KEY (provider, session_id, event_id)
 ) WITHOUT ROWID;
 
@@ -186,6 +187,8 @@ def open_db(path=None) -> sqlite3.Connection:
     ue_cols = {r[1] for r in conn.execute("PRAGMA table_info(usage_events)")}
     if ue_cols and "service_tier" not in ue_cols:
         conn.execute("ALTER TABLE usage_events ADD COLUMN service_tier TEXT")
+    if ue_cols and "images" not in ue_cols:
+        conn.execute("ALTER TABLE usage_events ADD COLUMN images INTEGER NOT NULL DEFAULT 0")
     conn.commit()
     return conn
 
