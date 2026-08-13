@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
     agent_id      TEXT,
     cwd           TEXT,
     cost_micros   INTEGER,                -- provider-reported cost (grok); NULL = compute from pricing
+    service_tier  TEXT,                   -- codex thread_settings.service_tier; NULL = standard
     PRIMARY KEY (provider, session_id, event_id)
 ) WITHOUT ROWID;
 
@@ -66,6 +67,31 @@ CREATE TABLE IF NOT EXISTS snapshots (
 # 1h cache-write = 2.0x base input; 5m = 1.25x base input -> 1h = 1.6x the 5m rate.
 CACHE_1H_FACTOR = 1.6
 
+# Codex priority ("fast") service tier bills at a multiple of the standard card.
+# `~/.codex/config.toml`'s `service_tier` selects it and codex stamps the chosen
+# tier into each rollout as `thread_settings.service_tier`. Values from ccusage's
+# fast-multiplier-overrides.json, which is the only public table for these.
+#
+# Read the tier PER ROLLOUT, never from the live config: the config records what
+# is set *now*, and projecting that backwards re-prices history that was billed
+# at standard. On this estate `service_tier = "priority"` was added 2026-08-13
+# (absent from config.toml.bak-20260805), so exactly 6 rollouts carry it —
+# applying today's setting to all 2,805 would have overstated codex ~2x.
+FAST_MULTIPLIER = {
+    "gpt-5.6-sol": 2.0, "gpt-5.6-terra": 2.0, "gpt-5.6-luna": 2.0,
+    "gpt-5.5": 2.5, "gpt-5.4": 2.0, "gpt-5.3-codex": 2.0,
+}
+FAST_TIERS = {"priority", "fast"}
+
+
+def fast_multiplier(model: str | None, service_tier: str | None) -> float:
+    """Multiplier for a row's service tier. 1.0 unless the rollout recorded fast."""
+    if not model or not service_tier or service_tier.lower() not in FAST_TIERS:
+        return 1.0
+    # Longest matching pattern wins, same rule as the pricing table.
+    hits = [(len(p), m) for p, m in FAST_MULTIPLIER.items() if p in model]
+    return max(hits)[1] if hits else 1.0
+
 # (pattern, in, out, cache_read, cache_write_5m, is_estimate, note,
 #  valid_from, valid_to)
 #
@@ -97,19 +123,25 @@ PRICING_SEED: list[tuple] = [
     ('gemini-3-flash', 0.5, 3.0, 0.05, 0.0, 0, "Gemini 3 Flash published - verified 2026-07-30. Previous 0.30/2.50 was Gemini 2.5 Flash's rate left on a newer model. Cache read at the 10% convention.", '', ''),
     ('glm', 1.4, 4.4, 0.26, 0.0, 0, "GLM-5.1/5.2 Z.ai list - verified 2026-07-30. OpenRouter's 0.966/3.036 is the same card at 31% off; list is used to answer 'what would the API have charged'.", '', ''),
     ('glm-5.2', 1.4, 4.4, 0.26, 0.0, 0, "GLM-5.2 Z.ai list - verified 2026-07-30", '', ''),
-    ('gpt-5.2', 1.75, 14.0, 0.175, 0.0, 0, "OpenAI list", '', ''),
-    ('gpt-5.4', 2.5, 15.0, 0.25, 0.0, 0, "OpenAI list", '2026-03-05', ''),
-    ('gpt-5.4-mini', 0.75, 4.5, 0.075, 0.0, 0, "OpenAI list", '2026-03-05', ''),
-    ('gpt-5.4-nano', 0.2, 1.25, 0.02, 0.0, 0, "OpenAI list", '2026-03-05', ''),
-    ('gpt-5.5', 5.0, 30.0, 0.5, 0.0, 0, "OpenAI list", '2026-04-23', ''),
-    ('gpt-5.6', 5.0, 30.0, 0.5, 0.0, 0, "OpenAI list (sol)", '2026-07-09', ''),
-    ('gpt-5.6-luna', 1.0, 6.0, 0.1, 0.0, 0, "OpenAI list", '2026-07-09', ''),
-    ('gpt-5.6-terra', 2.5, 15.0, 0.25, 0.0, 0, "OpenAI list", '2026-07-09', ''),
+    ('gpt-5.2', 1.75, 14.0, 0.175, 2.1875, 0, "OpenAI list; cache write at the 1.25x-input convention", '', ''),
+    ('gpt-5.4', 2.5, 15.0, 0.25, 3.125, 0, "OpenAI list; cache write at the 1.25x-input convention", '2026-03-05', ''),
+    ('gpt-5.4-mini', 0.75, 4.5, 0.075, 0.9375, 0, "OpenAI list; cache write at the 1.25x-input convention", '2026-03-05', ''),
+    ('gpt-5.4-nano', 0.2, 1.25, 0.02, 0.25, 0, "OpenAI list; cache write at the 1.25x-input convention", '2026-03-05', ''),
+    ('gpt-5.5', 5.0, 30.0, 0.5, 6.25, 0, "OpenAI list; cache write at the 1.25x-input convention", '2026-04-23', ''),
+    # Cache write 6.25 verified 2026-08-05 against OpenAI's published card. NOT
+    # modelled: requests over 272K input bill the WHOLE request at 2x input /
+    # 1.5x output, and rollout files carry no per-request input size to detect it.
+    ('gpt-5.6', 5.0, 30.0, 0.5, 6.25, 0, "OpenAI list (sol); cache write verified 2026-08-05", '2026-07-09', ''),
+    # Input/output unconfirmed: a secondary source quotes luna 0.20/1.20 and
+    # terra 2.00/12.00. No luna or terra usage on this estate, so left as-is
+    # rather than changed on one source.
+    ('gpt-5.6-luna', 1.0, 6.0, 0.1, 1.25, 0, "OpenAI list; cache write at the 1.25x-input convention", '2026-07-09', ''),
+    ('gpt-5.6-terra', 2.5, 15.0, 0.25, 3.125, 0, "OpenAI list; cache write at the 1.25x-input convention", '2026-07-09', ''),
     ('kimi', 0.6, 3.0, 0.15, 0.0, 0, "Kimi K2.5 - Moonshot published card, verified 2026-07-30. Cache-hit input quoted 0.10-0.16 across providers; 0.15 used.", '', ''),
     ('minimax', 0.24, 0.96, 0.024, 0.0, 0, "MiniMax M2.7 published - verified 2026-07-30. Cache read at the 10% convention.", '', ''),
     ('claude-unknown', 5.0, 25.0, 0.5, 6.25, 1, "recovered rows w/o model; era's dominant tier (opus-4-6)", '', ''),
     ('gemini-3.1-pro', 1.25, 10.0, 0.125, 0.0, 1, "Gemini 3.1 Pro card not verified 2026-07-30 - needs a source", '', ''),
-    ('gpt-5', 1.75, 14.0, 0.175, 0.0, 1, "fallback for unlabelled gpt-5.x only; specific gpt-5.x rows are exact", '', ''),
+    ('gpt-5', 1.75, 14.0, 0.175, 2.1875, 1, "fallback for unlabelled gpt-5.x only; specific gpt-5.x rows are exact", '', ''),
     ('grok', 0.2, 0.5, 0.05, 0.0, 1, "grok reports cost_micros directly, so this row rarely applies", '', ''),
     ('ollama', 0.22, 1.8, 0.022, 0.0, 1, "hosted-equivalent for locally served models; see qwen note", '', ''),
     ('qwen', 0.22, 1.8, 0.022, 0.0, 1, "hosted-equivalent: Qwen3-Coder-480B on Alibaba Model Studio standard tier ($0.22/$1.80). Cache read assumed 10% of input - not published.", '', ''),
@@ -148,6 +180,12 @@ def open_db(path=None) -> sqlite3.Connection:
         # price silently replaced its sticker price. Rebuilt from the seed.
         conn.execute("DROP TABLE IF EXISTS pricing")
         conn.executescript(SCHEMA)
+    # service_tier, added in place. CREATE TABLE IF NOT EXISTS above is a no-op
+    # on an existing usage_events, so the column has to be ALTERed in or every
+    # priority-tier row silently bills at standard on an upgraded database.
+    ue_cols = {r[1] for r in conn.execute("PRAGMA table_info(usage_events)")}
+    if ue_cols and "service_tier" not in ue_cols:
+        conn.execute("ALTER TABLE usage_events ADD COLUMN service_tier TEXT")
     conn.commit()
     return conn
 
@@ -221,4 +259,6 @@ def event_cost_usd(pricing: list[tuple], row: dict) -> tuple[float, bool]:
         + row.get("cache_read_tokens", 0) * cr_r
         + write_cost
     ) / 1e6
+    # Priority/fast tier multiplies the whole request, every bucket alike.
+    usd *= fast_multiplier(row.get("model"), row.get("service_tier"))
     return usd, bool(est)

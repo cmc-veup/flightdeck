@@ -40,23 +40,26 @@ def build(db_path=None, include_archive: bool = True) -> dict:
     pricing = load_pricing(conn)
     cur = conn.execute(
         """
-        SELECT substr(ts, 1, 10) AS day, model,
+        SELECT substr(ts, 1, 10) AS day, model, service_tier,
                SUM(input_tokens), SUM(output_tokens),
                SUM(cache_creation_tokens), SUM(cache_read_tokens),
                SUM(cache_5m_tokens), SUM(cache_1h_tokens)
         FROM usage_events
         WHERE ts IS NOT NULL AND length(ts) >= 10
-        GROUP BY day, model
+        GROUP BY day, model, service_tier
         ORDER BY day, model
         """
     )
     days: dict[str, dict] = {}
-    for day, model, inp, out, cc, cr, c5, c1 in cur:
+    # service_tier is in the GROUP BY, not just selected: the priority multiplier
+    # is per-request, so folding a standard and a priority row into one bucket
+    # before costing would apply one tier's rate to both.
+    for day, model, tier, inp, out, cc, cr, c5, c1 in cur:
         model = model or "unknown"
         cost, _ = event_cost_usd(
             pricing,
             {
-                "model": model, "cost_micros": None,
+                "model": model, "cost_micros": None, "service_tier": tier,
                 "input_tokens": inp, "output_tokens": out,
                 "cache_creation_tokens": cc, "cache_read_tokens": cr,
                 "cache_5m_tokens": c5, "cache_1h_tokens": c1,
