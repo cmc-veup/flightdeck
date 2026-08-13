@@ -258,15 +258,25 @@ def _section_table(out: list[str], title: str, section: dict) -> None:
     out.append(f"  {title}:")
     rows = sorted(section.items(), key=lambda kv: -_billed_tokens(kv[1]))
     name_w = max((len(k) for k, _ in rows), default=4) + 2
+    # The cost column carries an explicit leading space rather than relying on
+    # its field width to separate it from cache_rd. Width alone silently fails
+    # once the number fills the field: at $10,000+ the cost is 9 characters, so
+    # a `>9` field left no padding and printed `8,681,533,77214,890.63` — a
+    # spend figure fused to a token count, directly above the next row's own
+    # cost. Read down the column, that misattributes one row's spend to the
+    # row below it. The failure arrives with growth, not with a code change,
+    # and the header reserved 10 while the data used 9, so the columns were
+    # already off by one before any of that.
     out.append(
-        f"    {'':<{name_w}}{'events':>9}{'in':>14}{'out':>12}{'cache_wr':>14}{'cache_rd':>16}{'cost$':>10}"
+        f"    {'':<{name_w}}{'events':>9}{'in':>14}{'out':>12}{'cache_wr':>14}"
+        f"{'cache_rd':>16} {'cost$':>12}"
     )
     for name, v in rows:
         est = "*" if v["cost_is_estimate"] else ""
         out.append(
             f"    {name:<{name_w}}{_fmt(v['events']):>9}{_fmt(v['input_tokens']):>14}"
             f"{_fmt(v['output_tokens']):>12}{_fmt(v['cache_creation_tokens']):>14}"
-            f"{_fmt(v['cache_read_tokens']):>16}{v['cost_usd']:>9,.2f}{est}"
+            f"{_fmt(v['cache_read_tokens']):>16} {v['cost_usd']:>12,.2f}{est}"
         )
 
 
