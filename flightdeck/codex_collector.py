@@ -65,13 +65,14 @@ def parse_file(path: Path) -> tuple[dict | None, dict | None]:
     model: str | None = None
     last_tc: dict | None = None
     last_ts: str | None = None
+    service_tier: str | None = None
     fh = open(path, "r", encoding="utf-8", errors="replace")
     with fh:
         for line in fh:
             if not line.startswith("{"):
                 continue
             fast = ('"session_meta"' in line or '"turn_context"' in line
-                    or '"token_count"' in line)
+                    or '"token_count"' in line or '"thread_settings"' in line)
             if not fast:
                 continue
             try:
@@ -90,6 +91,15 @@ def parse_file(path: Path) -> tuple[dict | None, dict | None]:
             elif t == "event_msg" and payload.get("type") == "token_count":
                 last_tc = payload
                 last_ts = o.get("timestamp")
+            # thread_settings.service_tier is how codex stamps the tier the run
+            # actually used ("priority" = fast, billed at a multiple). Read it
+            # from the ROLLOUT, never from ~/.codex/config.toml: the config says
+            # what is set now, and back-projecting it re-prices history that was
+            # billed at standard. Absent = standard, which is the safe default.
+            if service_tier is None:
+                ts_block = payload.get("thread_settings")
+                if isinstance(ts_block, dict) and ts_block.get("service_tier"):
+                    service_tier = str(ts_block["service_tier"])
 
     if last_tc is None:
         return None, None
@@ -115,6 +125,7 @@ def parse_file(path: Path) -> tuple[dict | None, dict | None]:
         "agent_id": None,
         "cwd": meta.get("cwd"),
         "cost_micros": None,
+        "service_tier": service_tier,
     }
     snapshot = None
     rl = last_tc.get("rate_limits")
@@ -128,7 +139,7 @@ REPLACE_SQL = (
     "INSERT OR REPLACE INTO usage_events (provider, account_root, session_id, event_id,"
     " model, ts, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,"
     " cache_5m_tokens, cache_1h_tokens, reasoning_tokens, is_sidechain, agent_id, cwd,"
-    " cost_micros) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    " cost_micros, service_tier) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 )
 
 
@@ -141,6 +152,7 @@ def insert_row(conn, row: dict) -> None:
             row["cache_creation_tokens"], row["cache_read_tokens"],
             row["cache_5m_tokens"], row["cache_1h_tokens"], row["reasoning_tokens"],
             row["is_sidechain"], row["agent_id"], row["cwd"], row["cost_micros"],
+            row.get("service_tier"),
         ),
     )
 

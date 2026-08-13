@@ -132,13 +132,15 @@ def gather(since: str = "24h", now: str | None = None, db_path=None) -> dict:
     delegating = delegating_providers(conn)
     cur = conn.execute(
         f"""
-        SELECT provider, account_root, model, is_sidechain,
+        SELECT provider, account_root, model, is_sidechain, service_tier,
                {', '.join(f'SUM({c})' for c in TOKEN_COLS)},
                COUNT(*), SUM(COALESCE(cost_micros, 0)),
                SUM(CASE WHEN cost_micros IS NOT NULL THEN 1 ELSE 0 END)
         FROM usage_events
         WHERE ts IS NOT NULL AND ts >= ? AND ts < ?
-        GROUP BY provider, account_root, model, is_sidechain
+        -- service_tier joins the key: the priority multiplier is per-request,
+        -- so a standard and a priority row must not share a cost bucket.
+        GROUP BY provider, account_root, model, is_sidechain, service_tier
         """,
         (start, end),
     )
@@ -155,17 +157,18 @@ def gather(since: str = "24h", now: str | None = None, db_path=None) -> dict:
 
     for r in cur:
         provider, account, model, side = r[0], r[1], r[2] or "?", r[3]
+        tier = r[4]
         source = SOURCE_NAMES.get(side, "subagent")
-        row = dict(zip(TOKEN_COLS, r[4:11]))
+        row = dict(zip(TOKEN_COLS, r[5:12]))
         row = {k: int(v or 0) for k, v in row.items()}
-        row["events"] = r[11]
-        reported_micros, reported_n = r[12], r[13]
-        if reported_n and reported_n == r[11]:
+        row["events"] = r[12]
+        reported_micros, reported_n = r[13], r[14]
+        if reported_n and reported_n == r[12]:
             cost, est = reported_micros / 1e6, False
         else:
             cost, est = event_cost_usd(
                 pricing,
-                row | {"model": model, "cost_micros": None},
+                row | {"model": model, "cost_micros": None, "service_tier": tier},
             )
         _add(by_provider.setdefault(provider, _zero()), row, cost, est)
         _add(by_model.setdefault(model, _zero()), row, cost, est)
