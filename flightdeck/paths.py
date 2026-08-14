@@ -87,6 +87,10 @@ def discover_claude_roots(home: Path | None = None) -> list[tuple[Path, str, str
 CLAUDE_ROOTS: list[tuple[Path, str, str]] = discover_claude_roots()
 
 CODEX_SESSIONS = HOME / ".codex" / "sessions"
+# Kimi Code CLI: its own tree, NOT a Claude-shell backend. The kimi-k2.5 rows
+# already in the DB came through CLAUDE_CONFIG_DIR pools and are labelled
+# provider "claude"; this is the standalone CLI and lands as provider "kimi".
+KIMI_SESSIONS = HOME / ".kimi-code" / "sessions"
 GROK_DB = HOME / ".grok" / "grok.db"
 
 
