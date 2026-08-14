@@ -182,6 +182,11 @@ def _run_locked(full: bool = False, quiet: bool = False) -> dict:
             n_files += 1
         if latest_snapshot is not None:
             codex_collector.save_snapshot(conn, latest_snapshot, utcnow_iso())
+        # Sample the configured account each pass -- nothing else preserves the
+        # switch boundaries (caam logs no codex activation, rollouts carry no
+        # identity). See codex_auth_history for why this is NOT the same as
+        # knowing which account a given reading came from.
+        codex_collector.record_auth_identity(conn, HOME, utcnow_iso())
         conn.commit()
         checkpoint.save(ck)
         stats["files_scanned"] += n_files

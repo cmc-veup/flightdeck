@@ -46,6 +46,34 @@ CREATE INDEX IF NOT EXISTS idx_usage_events_ts ON usage_events(ts);
 -- out" -- during an active swarm that is the only question that matters. Codex
 -- stamps a rate_limits block into EVERY token_count event, so a full trajectory
 -- is recoverable from rollouts already on disk rather than sampled from now on.
+-- Which Codex account the machine was CONFIGURED for, over time.
+--
+-- caam swaps auth.json in place, so both accounts share ~/.codex/sessions and a
+-- rollout carries no account identity (`limit_id` is the LIMIT bucket, not the
+-- account -- both accounts report `codex`, and `codex_bengalfox` is the Spark
+-- model tier). caam's own activity_log is no help either: it logged no codex
+-- activation after 2026-07-27 even though an account was added on 08-14.
+--
+-- So identity has to be sampled, not reconstructed. Each collect records who
+-- auth.json points at; over time the rows become the switch boundaries nothing
+-- else preserves.
+--
+-- READ THE CAVEAT BEFORE JOINING THIS TO quota_samples BY TIME: codex reads
+-- auth.json at PROCESS START, so a swarm launched before a switch keeps using
+-- the old token indefinitely. On 2026-08-14 auth flipped at 02:46 while 22
+-- processes from 20:49 the previous evening kept reporting the OLD account's
+-- exhausted 100%. Time alone therefore does NOT determine which account a
+-- reading came from. This table records what was CONFIGURED, which is a
+-- different question from what was USED.
+CREATE TABLE IF NOT EXISTS codex_auth_history (
+    account_id  TEXT NOT NULL,
+    email       TEXT,
+    plan_type   TEXT,
+    first_seen  TEXT NOT NULL,
+    last_seen   TEXT NOT NULL,
+    PRIMARY KEY (account_id)
+);
+
 CREATE TABLE IF NOT EXISTS quota_samples (
     provider       TEXT NOT NULL,
     scope          TEXT NOT NULL,      -- primary | secondary
