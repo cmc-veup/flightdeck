@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import errno
+import fcntl
 import os
 import sys
 import time
@@ -9,12 +12,68 @@ import time
 from . import (checkpoint, claude_collector, codex_collector, grok_collector,
                kimi_collector)
 from .db import open_db, refresh_pricing, utcnow_iso
-from .paths import CLAUDE_ROOTS, CODEX_SESSIONS, GROK_DB, KIMI_SESSIONS, HOME
+from .paths import (CLAUDE_ROOTS, CODEX_SESSIONS, FLIGHTDECK_DIR, GROK_DB,
+                    KIMI_SESSIONS, HOME)
 
 SAVE_EVERY = 250  # files between checkpoint flushes (crash safety)
+LOCK_PATH = FLIGHTDECK_DIR / "collect.lock"
+
+
+@contextlib.contextmanager
+def _single_writer(wait_s: float = 0.0):
+    """Serialize collects across processes. Yields True if we hold the lock.
+
+    Three schedulers call collect on this machine -- the hourly device job, the
+    15-minute profile refresh, and hand runs -- so overlap is routine, not
+    exotic. Two collects against one SQLite file produce
+    `OperationalError: database is locked`: the loser dies mid-scan, and
+    because a file is only checkpointed AFTER its rows commit, its work is
+    simply redone next pass. Nothing is corrupted and nothing is lost, but the
+    run that died reports failure and any caller chained behind it (badge
+    regeneration, a push) is skipped.
+
+    The lock lives in the library rather than in each caller precisely because
+    the third writer is a human at a prompt -- a wrapper script cannot protect
+    an invocation that does not go through it.
+
+    Advisory, non-blocking by default: if another collect is already running,
+    say so and skip rather than queue. Collect is incremental and idempotent,
+    so a skipped run costs nothing -- the next one picks up the same files.
+    """
+    fh = open(LOCK_PATH, "w")
+    deadline = time.time() + wait_s
+    try:
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as e:
+                if e.errno not in (errno.EACCES, errno.EAGAIN):
+                    raise
+                if time.time() >= deadline:
+                    yield False
+                    return
+                time.sleep(0.25)
+        try:
+            yield True
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+    finally:
+        fh.close()
 
 
 def run(full: bool = False, quiet: bool = False) -> dict:
+    with _single_writer() as acquired:
+        if not acquired:
+            if not quiet:
+                print("collect: another collect is running — skipping this pass",
+                      file=sys.stderr, flush=True)
+            return {"files_scanned": 0, "files_skipped": 0, "rows": 0,
+                    "by_source": {}, "skipped_locked": True}
+        return _run_locked(full=full, quiet=quiet)
+
+
+def _run_locked(full: bool = False, quiet: bool = False) -> dict:
     t0 = time.time()
     conn = open_db()
     refresh_pricing(conn)
@@ -106,7 +165,7 @@ def run(full: bool = False, quiet: bool = False) -> dict:
                 stats["files_skipped"] += 1
                 continue
             try:
-                row, snapshot = codex_collector.parse_file(f)
+                row, snapshot, quota = codex_collector.parse_file(f)
             except OSError:
                 # Unreadable this pass: leave it UNMARKED so the next collect
                 # retries. Marking it anyway (the old fail-open behavior) froze
@@ -115,6 +174,7 @@ def run(full: bool = False, quiet: bool = False) -> dict:
             if row is not None:
                 codex_collector.insert_row(conn, row)
                 n_rows += 1
+            codex_collector.insert_quota(conn, quota)
             if snapshot is not None and (snapshot.get("timestamp") or "") > latest_snapshot_ts:
                 latest_snapshot = snapshot
                 latest_snapshot_ts = snapshot.get("timestamp") or ""
