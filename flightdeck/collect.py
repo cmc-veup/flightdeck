@@ -12,7 +12,7 @@ import time
 from . import (checkpoint, claude_collector, codex_collector, grok_collector,
                kimi_collector)
 from .db import open_db, refresh_pricing, utcnow_iso
-from .paths import (CLAUDE_ROOTS, CODEX_SESSIONS, FLIGHTDECK_DIR, GROK_DB,
+from .paths import (CLAUDE_ROOTS, CODEX_ROOTS, FLIGHTDECK_DIR, GROK_DB,
                     KIMI_SESSIONS, HOME)
 
 SAVE_EVERY = 250  # files between checkpoint flushes (crash safety)
@@ -150,12 +150,12 @@ def _run_locked(full: bool = False, quiet: bool = False) -> dict:
         stats["by_source"]["kimi"] = {"files": n_files, "rows": n_rows}
         log(f"kimi: {n_files} files parsed, {n_rows} usage rows")
 
-    # --- Codex rollouts ---
-    if CODEX_SESSIONS.is_dir():
+    # --- Codex rollouts (one pass per discovered account home) ---
+    for codex_root, codex_account in CODEX_ROOTS:
         n_files = n_rows = 0
         latest_snapshot = None
         latest_snapshot_ts = ""
-        for f in codex_collector.discover_files(CODEX_SESSIONS):
+        for f in codex_collector.discover_files(codex_root):
             try:
                 st = os.stat(f)
             except OSError:
@@ -172,7 +172,7 @@ def _run_locked(full: bool = False, quiet: bool = False) -> dict:
                 # the file out of every future incremental run.
                 continue
             if row is not None:
-                codex_collector.insert_row(conn, row)
+                codex_collector.insert_row(conn, row, codex_account)
                 n_rows += 1
             codex_collector.insert_quota(conn, quota)
             if snapshot is not None and (snapshot.get("timestamp") or "") > latest_snapshot_ts:
@@ -186,8 +186,8 @@ def _run_locked(full: bool = False, quiet: bool = False) -> dict:
         checkpoint.save(ck)
         stats["files_scanned"] += n_files
         stats["rows"] += n_rows
-        stats["by_source"]["codex"] = {"files": n_files, "rows": n_rows}
-        log(f"codex: {n_files} rollouts parsed, {n_rows} usage rows")
+        stats["by_source"][f"codex:{codex_account}"] = {"files": n_files, "rows": n_rows}
+        log(f"codex:{codex_account}: {n_files} rollouts parsed, {n_rows} usage rows")
 
     # --- Grok ---
     last_id = int(ck["cursors"].get("grok_last_id", 0))

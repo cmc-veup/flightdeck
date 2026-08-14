@@ -64,8 +64,8 @@ def discover_files(root: Path) -> Iterator[Path]:
     yield from sorted(root.rglob("rollout-*.jsonl"))
 
 
-def parse_file(path: Path) -> tuple[dict | None, dict | None]:
-    """Returns (usage_row | None, rate_limits_snapshot | None).
+def parse_file(path: Path) -> tuple[dict | None, dict | None, list[dict]]:
+    """Returns (usage_row | None, rate_limits_snapshot | None, quota_samples).
 
     Raises OSError when the file cannot be opened, so the caller can leave it
     unmarked in the checkpoint and retry next collect (fail-closed). Swallowing
@@ -78,6 +78,7 @@ def parse_file(path: Path) -> tuple[dict | None, dict | None]:
     last_ts: str | None = None
     service_tier: str | None = None
     images = 0
+    samples: list[dict] = []
     fh = open(path, "r", encoding="utf-8", errors="replace")
     with fh:
         for line in fh:
@@ -106,6 +107,20 @@ def parse_file(path: Path) -> tuple[dict | None, dict | None]:
             elif t == "event_msg" and payload.get("type") == "token_count":
                 last_tc = payload
                 last_ts = o.get("timestamp")
+                # Keep EVERY rate_limits reading, not just the final one: the
+                # series is what turns "19% right now" into "19% and climbing
+                # at N%/hr", which is the only form that predicts the wall.
+                rl_now = payload.get("rate_limits")
+                if isinstance(rl_now, dict) and o.get("timestamp"):
+                    for scope in ("primary", "secondary"):
+                        w = rl_now.get(scope)
+                        if isinstance(w, dict) and w.get("used_percent") is not None:
+                            samples.append({
+                                "scope": scope, "ts": o["timestamp"],
+                                "used_percent": w.get("used_percent"),
+                                "window_minutes": w.get("window_minutes"),
+                                "plan_type": rl_now.get("plan_type"),
+                            })
             # thread_settings.service_tier is how codex stamps the tier the run
             # actually used ("priority" = fast, billed at a multiple). Read it
             # from the ROLLOUT, never from ~/.codex/config.toml: the config says
@@ -117,11 +132,11 @@ def parse_file(path: Path) -> tuple[dict | None, dict | None]:
                     service_tier = str(ts_block["service_tier"])
 
     if last_tc is None:
-        return None, None
+        return None, None, samples
     info = last_tc.get("info") if isinstance(last_tc.get("info"), dict) else {}
     tu = info.get("total_token_usage") if isinstance(info.get("total_token_usage"), dict) else {}
     if not tu:
-        return None, None
+        return None, None, samples
     inp = int(tu.get("input_tokens") or 0)
     cached = int(tu.get("cached_input_tokens") or 0)
     row = {
@@ -148,7 +163,7 @@ def parse_file(path: Path) -> tuple[dict | None, dict | None]:
     if isinstance(rl, dict):
         snapshot = {"timestamp": last_ts, "rate_limits": rl,
                     "plan_type": rl.get("plan_type")}
-    return row, snapshot
+    return row, snapshot, samples
 
 
 REPLACE_SQL = (
@@ -159,11 +174,11 @@ REPLACE_SQL = (
 )
 
 
-def insert_row(conn, row: dict) -> None:
+def insert_row(conn, row: dict, account: str = "codex") -> None:
     conn.execute(
         REPLACE_SQL,
         (
-            "codex", "codex", row["session_id"], row["event_id"], row["model"],
+            "codex", account, row["session_id"], row["event_id"], row["model"],
             row["ts"], row["input_tokens"], row["output_tokens"],
             row["cache_creation_tokens"], row["cache_read_tokens"],
             row["cache_5m_tokens"], row["cache_1h_tokens"], row["reasoning_tokens"],
@@ -179,3 +194,18 @@ def save_snapshot(conn, snapshot: dict, now_iso: str) -> None:
         " VALUES ('codex', 'rate_limits', ?, ?)",
         (json.dumps(snapshot), now_iso),
     )
+
+
+QUOTA_SQL = (
+    "INSERT OR IGNORE INTO quota_samples (provider, scope, ts, used_percent,"
+    " window_minutes, plan_type) VALUES ('codex',?,?,?,?,?)"
+)
+
+
+def insert_quota(conn, samples: list[dict]) -> None:
+    if not samples:
+        return
+    conn.executemany(QUOTA_SQL, [
+        (s["scope"], s["ts"], s["used_percent"], s["window_minutes"], s["plan_type"])
+        for s in samples
+    ])

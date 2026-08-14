@@ -87,6 +87,54 @@ def discover_claude_roots(home: Path | None = None) -> list[tuple[Path, str, str
 CLAUDE_ROOTS: list[tuple[Path, str, str]] = discover_claude_roots()
 
 CODEX_SESSIONS = HOME / ".codex" / "sessions"
+
+
+def discover_codex_roots(home: Path | None = None) -> list[tuple[Path, str]]:
+    """Every Codex session tree on this machine, as (sessions_dir, account_label).
+
+    Discovery, not a hardcoded path — for the same reason discover_claude_roots
+    exists. A second Codex account arrives one of two ways and only one of them
+    is visible to a fixed `~/.codex`:
+
+      * `caam add codex <name>` swaps auth in place, so both accounts share
+        ~/.codex/sessions. Captured either way, but indistinguishable — the same
+        attribution loss Claude has under `caam activate`.
+      * `caam exec codex <name>` (and any CODEX_HOME override) gives the profile
+        its own HOME, so its rollouts land somewhere else entirely and a fixed
+        path misses 100% of them.
+
+    That second case is exactly how ~/.kimi-code went uncollected: the collector
+    knew one location and the tool wrote to another. Returns labels so each
+    account gets its own account_root instead of collapsing into one bucket.
+    """
+    h = home or HOME
+    found: dict[Path, str] = {}
+
+    env = os.environ.get("CODEX_HOME")
+    if env:
+        p = Path(env).expanduser() / "sessions"
+        if p.is_dir():
+            found[p] = "codex"
+
+    default = h / ".codex" / "sessions"
+    if default.is_dir():
+        found[default] = "codex"
+
+    # ~/.codex-<name>/sessions — mirrors the ~/.claude-<name> convention.
+    for d in sorted(h.glob(".codex-*")):
+        if (d / "sessions").is_dir():
+            found[d / "sessions"] = d.name[len(".codex-"):]
+
+    # caam's isolated ("shallow") profile homes: ~/.caam-shallow/<profile>/.codex
+    for d in sorted((h / ".caam-shallow").glob("*")):
+        p = d / ".codex" / "sessions"
+        if p.is_dir():
+            found[p] = f"caam:{d.name}"
+
+    return [(p, label) for p, label in sorted(found.items())]
+
+
+CODEX_ROOTS: list[tuple[Path, str]] = discover_codex_roots()
 # Kimi Code CLI: its own tree, NOT a Claude-shell backend. The kimi-k2.5 rows
 # already in the DB came through CLAUDE_CONFIG_DIR pools and are labelled
 # provider "claude"; this is the standalone CLI and lands as provider "kimi".
