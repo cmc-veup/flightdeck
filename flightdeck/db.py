@@ -9,6 +9,7 @@ split. Per the plan's escape hatch, flightdeck owns a clean schema in
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 from datetime import datetime, timezone
 
@@ -39,6 +40,22 @@ CREATE TABLE IF NOT EXISTS usage_events (
 ) WITHOUT ROWID;
 
 CREATE INDEX IF NOT EXISTS idx_usage_events_ts ON usage_events(ts);
+
+-- Quota readings over time. `snapshots` is INSERT OR REPLACE and keeps only the
+-- newest value, which answers "where am I now" but never "am I about to run
+-- out" -- during an active swarm that is the only question that matters. Codex
+-- stamps a rate_limits block into EVERY token_count event, so a full trajectory
+-- is recoverable from rollouts already on disk rather than sampled from now on.
+CREATE TABLE IF NOT EXISTS quota_samples (
+    provider       TEXT NOT NULL,
+    scope          TEXT NOT NULL,      -- primary | secondary
+    ts             TEXT NOT NULL,      -- ISO8601 Z
+    used_percent   REAL,
+    window_minutes INTEGER,
+    plan_type      TEXT,
+    PRIMARY KEY (provider, scope, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_quota_ts ON quota_samples(provider, ts);
 
 CREATE TABLE IF NOT EXISTS pricing (
     model_pattern        TEXT NOT NULL,     -- longest substring match against model id wins
@@ -176,6 +193,18 @@ def open_db(path=None) -> sqlite3.Connection:
     # commit whenever a concurrent full scan held its 250-file batch
     # transaction longer than 5s. 30s outlasts any observed batch window.
     conn = sqlite3.connect(str(path or DB_PATH), timeout=30.0)
+    # WAL, because the default `delete` journal makes ANY writer block ALL
+    # readers. Three schedulers touch this file -- the hourly device collect,
+    # the 15-minute profile refresh (collect THEN badges), and hand runs -- so
+    # a `total`, a `badges`, or a `doctor` overlapping a collect took the whole
+    # run down with "database is locked" even though one side was only reading.
+    # Under WAL readers never block the writer and the writer never blocks
+    # readers; only writer-vs-writer remains, which collect's own lock covers.
+    # Persistent once set, so this is a no-op after the first open. Local disk
+    # only -- WAL is unsafe over network filesystems, and ~/.flightdeck is not.
+    with contextlib.suppress(sqlite3.DatabaseError):
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")   # WAL's durable-enough pairing
     conn.executescript(SCHEMA)
     # Effective-dating, added in place for databases created before it existed.
     cols = {r[1] for r in conn.execute("PRAGMA table_info(pricing)")}
