@@ -138,6 +138,11 @@ PRICING_SEED: list[tuple] = [
     # rather than changed on one source.
     ('gpt-5.6-luna', 1.0, 6.0, 0.1, 1.25, 0, "OpenAI list; cache write at the 1.25x-input convention", '2026-07-09', ''),
     ('gpt-5.6-terra', 2.5, 15.0, 0.25, 3.125, 0, "OpenAI list; cache write at the 1.25x-input convention", '2026-07-09', ''),
+    # K3 is 5x the K2.5 card, and 'kimi' matches 'kimi-code/k3' by substring —
+    # without this longer pattern the Kimi Code CLI would price at K2.5 rates
+    # and under-report 5x. Verified 2026-08-14 on platform.kimi.ai/docs/pricing/chat-k3.
+    ('kimi-code/k3', 3.0, 15.0, 0.30, 0.0, 0,
+     "Kimi K3 - platform.kimi.ai published card, verified 2026-08-14: $3.00 input / $0.30 cache-hit / $15.00 output. No separate cache-write rate is published.", '', ''),
     ('kimi', 0.6, 3.0, 0.15, 0.0, 0, "Kimi K2.5 - Moonshot published card, verified 2026-07-30. Cache-hit input quoted 0.10-0.16 across providers; 0.15 used.", '', ''),
     ('minimax', 0.24, 0.96, 0.024, 0.0, 0, "MiniMax M2.7 published - verified 2026-07-30. Cache read at the 10% convention.", '', ''),
     ('claude-unknown', 5.0, 25.0, 0.5, 6.25, 1, "recovered rows w/o model; era's dominant tier (opus-4-6)", '', ''),

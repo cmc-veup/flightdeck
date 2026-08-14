@@ -6,9 +6,10 @@ import os
 import sys
 import time
 
-from . import checkpoint, claude_collector, codex_collector, grok_collector
+from . import (checkpoint, claude_collector, codex_collector, grok_collector,
+               kimi_collector)
 from .db import open_db, refresh_pricing, utcnow_iso
-from .paths import CLAUDE_ROOTS, CODEX_SESSIONS, GROK_DB
+from .paths import CLAUDE_ROOTS, CODEX_SESSIONS, GROK_DB, KIMI_SESSIONS, HOME
 
 SAVE_EVERY = 250  # files between checkpoint flushes (crash safety)
 
@@ -64,6 +65,31 @@ def run(full: bool = False, quiet: bool = False) -> dict:
         stats["rows"] += n_rows
         stats["by_source"][label] = {"files": n_files, "rows": n_rows}
         log(f"{label}: {n_files} files parsed, {n_rows} usage rows")
+
+    # --- Kimi Code CLI ---
+    if KIMI_SESSIONS.is_dir():
+        n_files = n_rows = 0
+        workdirs = kimi_collector.load_workdirs(HOME)
+        for f in kimi_collector.discover_files(KIMI_SESSIONS):
+            try:
+                st = os.stat(f)
+            except OSError:
+                continue
+            key = str(f)
+            if checkpoint.file_unchanged(ck, key, st):
+                stats["files_skipped"] += 1
+                continue
+            rows = kimi_collector.parse_file(f, workdirs)
+            kimi_collector.insert_rows(conn, rows)
+            checkpoint.mark_file(ck, key, st)
+            n_files += 1
+            n_rows += len(rows)
+        conn.commit()
+        checkpoint.save(ck)
+        stats["files_scanned"] += n_files
+        stats["rows"] += n_rows
+        stats["by_source"]["kimi"] = {"files": n_files, "rows": n_rows}
+        log(f"kimi: {n_files} files parsed, {n_rows} usage rows")
 
     # --- Codex rollouts ---
     if CODEX_SESSIONS.is_dir():
