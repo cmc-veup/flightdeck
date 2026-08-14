@@ -209,3 +209,44 @@ def insert_quota(conn, samples: list[dict]) -> None:
         (s["scope"], s["ts"], s["used_percent"], s["window_minutes"], s["plan_type"])
         for s in samples
     ])
+
+
+def record_auth_identity(conn, home, now_iso: str) -> dict | None:
+    """Sample who ~/.codex/auth.json currently points at, and upsert the window.
+
+    The account is only in the id_token JWT -- auth.json's plain fields carry a
+    `tokens.account_id` but no email or plan, and a rollout carries no identity
+    at all. Decoding the payload is read-only and needs no verification: we are
+    reading our own local file to label our own data, not authenticating anyone.
+    """
+    import base64
+    p = Path(home) / ".codex" / "auth.json"
+    try:
+        d = json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    tok = d.get("tokens") or {}
+    acct = tok.get("account_id")
+    email = plan = None
+    idt = tok.get("id_token")
+    if idt and idt.count(".") == 2:
+        try:
+            body = idt.split(".")[1]
+            body += "=" * (-len(body) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(body))
+            email = claims.get("email")
+            auth = claims.get("https://api.openai.com/auth") or {}
+            acct = auth.get("chatgpt_account_id") or acct
+            plan = auth.get("chatgpt_plan_type")
+        except Exception:
+            pass
+    if not acct:
+        return None
+    conn.execute(
+        "INSERT INTO codex_auth_history (account_id, email, plan_type, first_seen, last_seen)"
+        " VALUES (?,?,?,?,?)"
+        " ON CONFLICT(account_id) DO UPDATE SET last_seen=excluded.last_seen,"
+        " email=COALESCE(excluded.email, email), plan_type=COALESCE(excluded.plan_type, plan_type)",
+        (acct, email, plan, now_iso, now_iso),
+    )
+    return {"account_id": acct, "email": email, "plan_type": plan}
