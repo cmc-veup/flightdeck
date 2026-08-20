@@ -24,7 +24,7 @@ Known, accepted gaps (labelled, never fudged):
   * resumed sessions (claude -r) have first events far before any new stamp
     and therefore never match — they stay unclassified;
   * Claude Code sidechains already carry delegation natively via
-    is_sidechain=1 and are reported as their own bucket, not stamped.
+    is_sidechain > 0 and are reported as their own bucket, not stamped.
 
 Usage:
     python3 -m flightdeck.delegation ingest    # manifest files -> spawn_stamps
@@ -219,7 +219,7 @@ def report(conn: sqlite3.Connection) -> dict:
         SELECT e.provider,
                COUNT(DISTINCT CASE WHEN d.session_id IS NOT NULL
                                    THEN e.session_id END) AS delegated,
-               COUNT(DISTINCT CASE WHEN e.is_sidechain = 1
+               COUNT(DISTINCT CASE WHEN e.is_sidechain > 0
                                    THEN e.session_id END) AS sidechain,
                COUNT(DISTINCT CASE WHEN d.session_id IS NULL
                                     AND e.is_sidechain = 0
